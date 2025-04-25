@@ -1,4 +1,4 @@
-# PUBLIC EMPLOYMENT PULSE
+# Public Employment Pulse
 
 *A Python powered data engineering initiative by the Employment and Inclusive Development Office of the Mayor’s Office of Barranquilla.*
 
