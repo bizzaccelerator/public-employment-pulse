@@ -4,6 +4,13 @@
 
 Public Employment Pulse is a strategic data-driven project designed to provide insights into the structure and dynamics of the public employment center operations in the city of Barranquilla. It was built to empower decision-makers, this repository combines data engineering workflows with clear analytical rationale to enhance public sector efficiency and promote inclusive development.
 
+### _What’s Inside:_
+
+- Documentation of the public employment landscape challenges
+- End-to-end data pipelines for transforming and integrating data
+- Technical architecture and implementation details
+- Visual dashboards for strategic monitoring
+
 ![dashboard]()
 
 ## Problem statement
@@ -17,3 +24,9 @@ To address these issues, there is a pressing need for a solution that streamline
 For the manager of the city’s Public Employment Center, ensuring access to reliable, real-time insights is not only essential for operational efficiency but also a core responsibility in the delivery of inclusive and equitable services.
 
 ### _Technical problem:_
+
+To address the fragmentation of data and improve decision-making within the Employment and Inclusive Development Office; as a data engineer, I must design and implement a centralized data integration and analytics platform.
+
+The solution should automate the collection, cleansing, transformation, and storage of data from three key sources—citizen registration, psychological support services, and job placement records—into a unified data warehouse or lakehouse.
+
+Next, the raw data must be processed and cleaned to ensure it is ready for use in visualization tools, enabling decision-makers to access insights at any time. All of this should be implemented within a cloud-based solution that enhances the reliability, clarity, and security of the data.
