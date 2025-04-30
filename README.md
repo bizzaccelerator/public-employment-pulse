@@ -31,3 +31,5 @@ To address the fragmentation of data and improve decision-making within the Empl
 The solution should automate the collection, cleansing, transformation, and storage of data from three key sources—citizen registration, psychological support services, and job placement records—into a unified data warehouse or lakehouse.
 
 Next, the raw data must be processed and cleaned to ensure it is ready for use in visualization tools, enabling decision-makers to access insights at any time. All of this should be implemented within a cloud-based solution that enhances the reliability, clarity, and security of the data.
+
+## Solution proposed
