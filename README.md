@@ -12,6 +12,7 @@ Public Employment Pulse is a strategic data-driven project designed to provide i
 - Visual dashboards for strategic monitoring
 
 ![Jobs](assets/jobs.jpg)
+Photo: (c) Ronald Candonga - pixabay.com
 
 ## Problem statement
 This could be understood in two leves: a business problem and a technical problem. 
