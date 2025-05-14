@@ -43,7 +43,7 @@ All these data operations are executed using `Python` within a Dockerized applic
 
 See here below the technologic architecture utilized:
 
-![Tech Infraestructure](assets/jobs.jpg)
+![Tech Infraestructure](assets/OIDP_DE_GCP.gif)
 
 ### Technologies used: 
 
