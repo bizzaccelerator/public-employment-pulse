@@ -35,15 +35,16 @@ Next, the raw data must be processed and cleaned to ensure it is ready for use i
 ## Solution proposed
 The proposed engineering solution extracts data from cumulative Excel registry files related to job seekers, recruitment interview preparation, companies, and job postings. These files are updated daily by staff and stored in the organization’s central repository on SharePoint, hosted in the Azure cloud. Once the relevant records for each month are identified, the data is converted and stored in `.parquet` format within a Google Cloud Storage (GCS) data lake, organized by month. The .parquet format is chosen for its efficient compression and fast query performance, while GCS offers scalable, secure, and cost-effective storage for large volumes of structured data.
 
-Once all raw data is collected for job seekers, interview preparation activities, talent demand, and job posting intermediation targets, a dedicated pipeline for each data source is implemented using Kestra as the orchestrator. These pipelines clean the data and load it into individual tables in `BigQuery` (BQ), partitioned by the date of transfer.
+Once all raw data is collected for job seekers, interview preparation activities, talent demand, and job posting intermediation targets, a dedicated pipeline for each data source is implemented using `Kestra` as the orchestrator. These pipelines clean the data and load it into individual tables in `BigQuery` (BQ), partitioned by the date of transfer.
 
 The cleaned data in BigQuery will be transformed using `dbt` to generate final, optimized tables and data marts for each data sink. These curated datasets will then be sent to `Looker`, where interactive dashboards will be built to enable C-suite managers to make informed, data-driven decisions.
 
-All these data operations are executed using `Python` within a Dockerized application image, ensuring portability and consistency across environments. The required infrastructure is provisioned and managed using `Terraform`, enabling version-controlled, automated deployments.
+All these data operations are executed using `Python` within a `Dockerized` application image, ensuring portability and consistency across environments. The required infrastructure is provisioned and managed using `Terraform`, enabling version-controlled, automated deployments.
 
 See here below the technologic architecture utilized:
 
 ![Tech Infraestructure](assets/OIDP_DE_GCP.gif)
+Photo: Diagram of the solution engineered.
 
 ### Technologies used: 
 
