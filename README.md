@@ -41,11 +41,6 @@ The cleaned data in BigQuery will be transformed using `dbt` to generate final, 
 
 All these data operations are executed using `Python` within a `Dockerized` application image, ensuring portability and consistency across environments. The required infrastructure is provisioned and managed using `Terraform`, enabling version-controlled, automated deployments.
 
-See here below the technologic architecture utilized:
-
-![Tech Infraestructure](assets/OIDP_DE_GCP.gif)
-Photo: Diagram of the solution engineered.
-
 ### Technologies used: 
 
 For this project I used the following technologies:
@@ -60,7 +55,12 @@ For this project I used the following technologies:
 - **Data transformation:** Data Build Tool (dbt).
 - **Containerizing:** Docker for developing, shipping, and running applications in containers. 
 
-See here below a high level sketch of the data handling operations used:
+See here below the technologic architecture utilized:
+
+![Tech Infraestructure](assets/OIDP_DE_GCP.gif)
+Photo: Diagram of the solution engineered.
+
+Please also check a high level sketch of the data handling operations used:
 
 ![Data handling](assets/zoom_storage.jpg)
 Photo: Zoom of data handling operations inside GCP.
