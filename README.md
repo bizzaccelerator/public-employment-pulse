@@ -60,7 +60,7 @@ For this project I used the following technologies:
 - **Data transformation:** Data Build Tool (dbt).
 - **Containerizing:** Docker for developing, shipping, and running applications in containers. 
 
-See here below the technologic architecture utilized:
+See here below a high level sketch of the data handling operations used:
 
 ![Data handling](assets/zoom_storage.jpge)
 Photo: Zoom of data handling operations inside GCP.
