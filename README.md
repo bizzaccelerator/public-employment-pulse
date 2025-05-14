@@ -62,7 +62,7 @@ For this project I used the following technologies:
 
 See here below a high level sketch of the data handling operations used:
 
-![Data handling](assets/zoom_storage.jpge)
+![Data handling](assets/zoom_storage.jpg)
 Photo: Zoom of data handling operations inside GCP.
 
 
