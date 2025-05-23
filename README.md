@@ -65,7 +65,6 @@ Please also check a high level sketch of the data handling operations used:
 ![Data handling](assets/zoom_storage.jpg)
 Photo: Zoom of data handling operations inside GCP.
 
-
 ### Tutorial to reproduce the project:
 
 The tutorials on how to setup and run this project can be found [here](https://github.com/bizzaccelerator/public-employment-pulse/wiki/Welcome-to-the-wiki).
