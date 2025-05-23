@@ -7,8 +7,8 @@ Public Employment Pulse is a strategic data-driven project designed to provide i
 ### _What’s Inside:_
 
 - Documentation of the public employment landscape challenges
-- End-to-end data pipelines for transforming and integrating data
 - Technical architecture and implementation details
+- End-to-end data pipelines for transforming and integrating data
 - Visual dashboards for strategic monitoring
 
 ![Jobs](assets/jobs.jpg)
