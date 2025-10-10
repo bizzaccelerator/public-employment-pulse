@@ -57,7 +57,6 @@ For this project I used the following technologies:
 
 See here below the technologic architecture utilized:
 
-![Tech Infraestructure](assets/OIDP_DE_GCP.gif)
 Photo: Diagram of the solution engineered.
 
 Please also check a high level sketch of the data handling operations used:
