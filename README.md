@@ -2,7 +2,7 @@
 
 *A Python powered data engineering initiative by the Employment and Inclusive Development Office of the Mayor’s Office of Barranquilla.*
 
-Public Employment Pulse is a strategic data-driven project designed to provide insights into the structure and dynamics of the public employment center operations in the city of Barranquilla. It was built to empower decision-makers, this repository combines data engineering workflows with clear analytical rationale to enhance public sector efficiency and promote inclusive development.
+Public Employment Pulse is a strategic data-driven project designed to provide insights into the structure and dynamics of the public employment center operations' in the city of Barranquilla. It was built to empower decision-makers, this repository combines data engineering workflows with clear analytical rationale to enhance public sector efficiency and promote inclusive development.
 
 ### _What’s Inside:_
 
@@ -46,7 +46,7 @@ All these data operations are executed using `Python` within a `Dockerized` appl
 For this project I used the following technologies:
 
 - **Cloud:** Google Cloud Platform with the following components
-    - *Deployment:* Google Cloud Run as a platform to deploy docker images.
+    - *Process:* Google Compute Engine as a platform to process services.
     - *Datalake:* Google Cloud Storage.
     - *Data warehouse:* BigQuery.
     - *Data Visualization:* Looker studio.

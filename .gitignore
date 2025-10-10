@@ -1,0 +1,6 @@
+.keys/*
+
+*.exe
+
+.terraform/
+.terraform.lock.hcl
