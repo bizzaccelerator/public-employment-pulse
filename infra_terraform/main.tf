@@ -10,40 +10,29 @@ terraform {
 
 provider "google" {
   credentials = file(var.credentials)
-  project = var.project
+  project = var.project_id
   region = var.region
-  // credentials = file(var.credentials)  # Use this if you do not want to set env-var GOOGLE_APPLICATION_CREDENTIALS
 }
 
-# Data Lake Bucket
-# Ref: https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/storage_bucket
-resource "google_storage_bucket" "data-lake-bucket" {
-  name          = "${local.data_lake_bucket}_${var.project}" # Concatenating DL bucket & Project name for unique naming
+module "gcs" {
+  source        = "./modules/gcs"
+  
+  project_id    = var.project_id
+  region        = var.region
+  credentials   = var.credentials
   location      = var.location
-
-  # Optional, but recommended settings:
+  BQ_DATASET    = var.BQ_DATASET
+  TABLE_NAME    = var.TABLE_NAME
   storage_class = var.storage_class
-  uniform_bucket_level_access = true
-
-  versioning {
-    enabled     = true
-  }
-
-  lifecycle_rule {
-    action {
-      type = "Delete"
-    }
-    condition {
-      age = 30  // days
-    }
-  }
-
-  force_destroy = true
 }
 
-# DWH
-resource "google_bigquery_dataset" "dataset" {
-  dataset_id = var.BQ_DATASET
-  project    = var.project
-  location   = var.location
+module "kestra" {
+  source = "./modules/kestra"
+
+  project_id      = var.project_id
+  project_name    = replace(var.project_id, "-", "_")
+  region          = var.region
+  zone            = var.zone
+  db_password     = var.kestra_db_password
+  gcs_bucket_name = module.gcs.kestra_bucket_name
 }
