@@ -1,4 +1,3 @@
-# GCS MODULE VARIABLES
 locals {
   data_lake_bucket = "operations-raw-data"
 }
@@ -18,7 +17,6 @@ variable "region" {
 
 variable "location" {
   description = "Project Location"
-  #Update the below to your desired location
 }
 
 variable "storage_class" {
@@ -33,18 +31,4 @@ variable "BQ_DATASET" {
 variable "TABLE_NAME" {
   description = "BigQuery table"
   type = string
-}
-
-
-
-# KESTRA MODULE VARIABLES
-variable "kestra_db_password" {
-  description = "Password for Kestra database user"
-  type        = string
-  sensitive   = true
-}
-
-variable "zone" {
-  description = "GCP zone"
-  type        = string
 }
