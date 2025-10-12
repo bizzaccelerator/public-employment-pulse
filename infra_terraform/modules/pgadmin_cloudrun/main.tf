@@ -1,0 +1,32 @@
+resource "google_cloud_run_service" "pgadmin" {
+  name     = var.service_name
+  location = var.region
+
+  template {
+    spec {
+      containers {
+        image = "dpage/pgadmin4:latest"
+        env {
+          name  = "PGADMIN_DEFAULT_EMAIL"
+          value = var.pgadmin_email
+        }
+        env {
+          name  = "PGADMIN_DEFAULT_PASSWORD"
+          value = var.pgadmin_password
+        }
+      }
+    }
+  }
+
+  traffic {
+    percent         = 100
+    latest_revision = true
+  }
+}
+
+resource "google_cloud_run_service_iam_member" "invoker" {
+  service    = google_cloud_run_service.pgadmin.name
+  location   = var.region
+  role       = "roles/run.invoker"
+  member     = var.invoker_identity
+}

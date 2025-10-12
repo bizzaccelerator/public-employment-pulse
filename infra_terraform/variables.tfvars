@@ -11,3 +11,16 @@ TABLE_NAME = "dummy"
 kestra_db_password = "kestra_secure_password_2024"
 zone = "us-central1-a"
 
+# Variables for VPC Connector module
+connector_name = "pgadmin-connector"
+
+# variables for Cloud SQL module
+instance_name = "postgres-16"
+db_user       = "main"
+db_password   = "postgres_secure_password_2024"
+db_name       = "app_db"
+
+# pgAdmin Cloud Run variables
+service_name = "pgadmin-service"
+pgadmin_email = "jobert.gutierrez@gmail.com"
+pgadmin_password = "pgadmin_secure_password_2024"
