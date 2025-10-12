@@ -13,6 +13,9 @@ zone = "us-central1-a"
 
 # Variables for VPC Connector module
 connector_name = "pgadmin-connector"
+vpc_network = "default"
+min_throughput = 200
+max_throughput = 400
 
 # variables for Cloud SQL module
 instance_name = "postgres-16"
@@ -24,3 +27,9 @@ db_name       = "app_db"
 service_name = "pgadmin-service"
 pgadmin_email = "jobert.gutierrez@gmail.com"
 pgadmin_password = "pgadmin_secure_password_2024"
+
+# IAM member with the role roles/run.invoker
+invoker_identity = "user:jobert.gutierrez@gmail.com"
+
+# Variables for Service Networking module
+private_ip_name = "cloudsql-private-ip"

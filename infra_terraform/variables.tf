@@ -61,6 +61,16 @@ variable "connector_name" {
   type        = string
 }
 
+variable "max_throughput" {
+  description = "VPC connector throughput in Mbps (200–1000, multiple of 100)"
+  type        = number
+}
+
+variable "min_throughput" {
+  description = "VPC connector throughput in Mbps (200–1000, multiple of 100)"
+  type        = number
+}
+
 
 # CLOUDSQL POSTGRES MODULE VARIABLES
 # Cloud SQL PostgreSQL
@@ -104,5 +114,11 @@ variable "pgadmin_password" {
 
 variable "invoker_identity" {
   description = "IAM identity allowed to invoke pgAdmin (e.g., user:you@example.com)"
+  type        = string
+}
+
+# SERVICE NETWORKING MODULE VARIABLES
+variable "private_ip_name" {
+  description = "Name for the private IP address"
   type        = string
 }

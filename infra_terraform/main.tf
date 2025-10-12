@@ -42,6 +42,21 @@ module "vpc_connector" {
   connector_name = "pgadmin-connector"
   region         = var.region
   vpc_network    = var.vpc_network
+  min_throughput = var.min_throughput
+  max_throughput = var.max_throughput
+}
+
+resource "google_project_iam_member" "cloudsql_client" {
+  project = var.project_id
+  role    = "roles/cloudsql.client"
+  member  = var.invoker_identity
+}
+
+module "service_networking" {
+  source           = "./modules/service_networking"
+  project_id       = var.project_id
+  vpc_network      = var.vpc_network
+  private_ip_name  = var.private_ip_name
 }
 
 module "cloudsql_postgres" {
@@ -52,6 +67,8 @@ module "cloudsql_postgres" {
   db_user       = var.db_user
   db_password   = var.db_password
   db_name       = var.db_name
+  project_id    = var.project_id
+  peering_dependency = module.service_networking.vpc_connection_name
 }
 
 module "pgadmin_cloudrun" {
@@ -60,11 +77,5 @@ module "pgadmin_cloudrun" {
   region           = var.region
   pgadmin_email    = var.pgadmin_email
   pgadmin_password = var.pgadmin_password
-  invoker_identity = var.invoker_identity
-}
-
-resource "google_project_iam_member" "cloudsql_client" {
-  project = var.project_id
-  role    = "roles/cloudsql.client"
-  member  = var.invoker_identity
+  invoker_identity = "allUsers"
 }

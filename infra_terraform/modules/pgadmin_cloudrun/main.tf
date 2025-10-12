@@ -3,9 +3,17 @@ resource "google_cloud_run_service" "pgadmin" {
   location = var.region
 
   template {
+    metadata {
+      annotations = {
+        "autoscaling.knative.dev/initial-scale" = "1"
+      }
+    }
     spec {
       containers {
         image = "dpage/pgadmin4:latest"
+        ports {
+          container_port = 80
+        }
         env {
           name  = "PGADMIN_DEFAULT_EMAIL"
           value = var.pgadmin_email

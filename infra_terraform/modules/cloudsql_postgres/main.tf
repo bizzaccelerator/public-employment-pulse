@@ -4,14 +4,18 @@ resource "google_sql_database_instance" "postgres_instance" {
   region           = var.region
 
   settings {
-    tier = "db-custom-1-3840" # Customize as needed
+    edition = "ENTERPRISE"
+    tier    = "db-custom-1-3840"
     ip_configuration {
-      private_network = var.vpc_network
+      private_network = "projects/${var.project_id}/global/networks/${var.vpc_network}"
     }
     backup_configuration {
       enabled = true
     }
   }
+  depends_on = [var.peering_dependency]
+
+  deletion_protection = false
 }
 
 resource "google_sql_user" "postgres_user" {
