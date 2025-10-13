@@ -62,8 +62,7 @@ Photo: Diagram of the solution engineered.
 
 Please also check a high level sketch of the data handling operations used:
 
-![Data handling](assets/zoom_storage.jpg)
-Photo: Zoom of data handling operations inside GCP.
+
 
 ### Tutorial to reproduce the project:
 
