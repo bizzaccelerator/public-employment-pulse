@@ -44,12 +44,7 @@ module "vpc_connector" {
   vpc_network    = var.vpc_network
   min_throughput = var.min_throughput
   max_throughput = var.max_throughput
-}
-
-resource "google_project_iam_member" "cloudsql_client" {
-  project = var.project_id
-  role    = "roles/cloudsql.client"
-  member  = var.invoker_identity
+  depends_on     = [module.service_networking]
 }
 
 module "service_networking" {
@@ -57,6 +52,12 @@ module "service_networking" {
   project_id       = var.project_id
   vpc_network      = var.vpc_network
   private_ip_name  = var.private_ip_name
+}
+
+resource "google_project_iam_member" "cloudsql_client" {
+  project = var.project_id
+  role    = "roles/cloudsql.client"
+  member  = var.invoker_identity
 }
 
 module "cloudsql_postgres" {
@@ -79,3 +80,4 @@ module "pgadmin_cloudrun" {
   pgadmin_password = var.pgadmin_password
   invoker_identity = "allUsers"
 }
+
