@@ -335,6 +335,16 @@ output "project_number" {
   value       = data.google_project.current.number
 }
 
+output "kestra_data_directory" {
+  description = "Directory on VM where you can upload files to share with Kestra"
+  value       = "/opt/kestra/data"
+}
+
+output "file_upload_command" {
+  description = "Command to upload files from your local machine to Kestra"
+  value       = "gcloud compute scp \"YOUR_LOCAL_FILE\" ${google_compute_instance.kestra_vm.name}:/opt/kestra/data/ --zone=${var.zone}"
+}
+
 output "cleanup_commands" {
   description = "Commands to run if terraform destroy fails"
   value = <<-EOT

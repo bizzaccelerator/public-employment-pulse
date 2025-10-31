@@ -55,6 +55,17 @@ echo "Creating Kestra directory..."
 mkdir -p /opt/kestra
 cd /opt/kestra
 
+# Create directory for shared data (NEW SECTION FOR VOLUME MOUNT)
+echo "Creating Kestra data directory for file sharing..."
+mkdir -p /opt/kestra/data
+chmod 755 /opt/kestra/data
+
+# Set ownership to handle Docker permissions
+# UID 1000 is typically the first non-root user and matches most Docker containers
+chown -R 1000:1000 /opt/kestra/data
+
+echo "Data directory created at /opt/kestra/data"
+
 # Debug: Show variables
 echo "Debug: Database host: ${db_host}"
 echo "Debug: Database name: ${db_name}"
@@ -76,6 +87,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /tmp/kestra-wd:/tmp/kestra-wd:rw
+      - /opt/kestra/data:/app/data:rw
     environment:
       KESTRA_CONFIGURATION: |
         kestra:
@@ -175,5 +187,6 @@ fi
 # Get external IP
 EXTERNAL_IP=$(curl -s ifconfig.me)
 echo "Kestra UI is available at: http://$EXTERNAL_IP:8080"
+echo "Upload files to /opt/kestra/data on this VM to access them in Kestra flows at /app/data"
 
 echo "Installation completed at $(date)"
