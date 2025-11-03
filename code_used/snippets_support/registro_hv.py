@@ -296,15 +296,6 @@ print(f"El número de HV actualizadas para adultos durante el mes {prev_month} e
 print(f"El número de HV actualizadas para jovenes durante el mes {prev_month} es: {valid[fr_actualizado & (valid['edad'] <= 28)]['género'].count()}")
 
 
-# Registros PcD atendidos en el CO 
-mes = 9
-año = 2025
-fm_pcd = (pd.to_datetime(valid['fecha_accion']).dt.month == mes) & (valid['canal_de_registro'] == 'Agencia') & (pd.to_datetime(valid['fecha_accion']).dt.year == año) & (~valid['discapacidad'].isna())
-
-pcd_registries = pd.pivot_table(valid[fm_pcd], values='número_documento' , index='rango_edad', columns='género', aggfunc='count', fill_value=0)
-pcd_registries
-
-
 # Exporting the data
 # prev_year = 2024
 # valid = valid[(pd.to_datetime(valid['año']) == prev_year)]

@@ -14,14 +14,14 @@ inputs:
     description: Year of data to process.
     displayName: "Choose the year of interest."
     defaults: "2025"
-    values: ["2024", "2025"]
-  
+    values: [ "2024", "2025" ]
+
   - id: month_of_interest
     type: SELECT
     description: Month of data to process.
     displayName: "Choose the month of interest."
     defaults: january
-    values: 
+    values:
       - january
       - february
       - march
@@ -38,36 +38,12 @@ inputs:
 variables:
   staging_table: "public.{{inputs.data_processed}}_staging"
   table: "public.{{inputs.data_processed}}"
+  file: "{{inputs.data_processed}}_{{ inputs.year_of_interest}}_{{inputs.month_of_interest}}"
 
 tasks:
   - id: download_file
     type: io.kestra.plugin.gcp.gcs.Download
     from: gs://operations-raw-data_public-employment-pulse/BD_Registro_2024_2025_acumulado.xlsx
-
-  # - id: process_excel
-  #   type: io.kestra.plugin.scripts.python.Script
-  #   docker:
-  #     image: python:3.11-slim
-  #   beforeCommands:
-  #     - pip install pandas openpyxl
-  #   script: |
-  #     import pandas as pd
-      
-  #     # Read the downloaded Excel file
-  #     excel_file = '{{ outputs.download_file.uri }}'
-      
-  #     # Read all sheets or specific sheet
-  #     df = pd.read_excel(excel_file, sheet_name='BD_Acumulado-2024-2025')
-      
-  #     # Display basic info
-  #     print(f"Rows: {len(df)}")
-  #     print(f"Columns: {list(df.columns)}")
-  #     print("\nFirst 5 rows:")
-  #     print(df.head())
-      
-  #     # Process your data
-  #     # Example: Save as CSV
-  #     df.to_csv('output.csv', index=False)
 
   - id: reading_monthly_registries
     type: io.kestra.plugin.scripts.python.Commands
@@ -88,7 +64,7 @@ tasks:
       - "python registro_hv.py"
     outputFiles:
       - "*.parquet"
-      
+
   - id: log_completion
     type: io.kestra.core.tasks.log.Log
     message: "Excel file processed successfully"
@@ -133,9 +109,16 @@ tasks:
           vereda_localidad_centro_poblado VARCHAR(255),
           pertenece_a VARCHAR(100),
           sise_offline VARCHAR(50),
-          mes VARCHAR(20),
+          mes INTEGER,
           anio INTEGER,
           punto_atencion VARCHAR(255),
+          fecha_accion TIMESTAMP,
+          grupos_etnicos VARCHAR(100),
+          vca VARCHAR(100),
+          discapacidad VARCHAR(100),
+          migrante VARCHAR(100),
+          vvg VARCHAR(100),
+          reincorporados VARCHAR(100),
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
@@ -143,8 +126,192 @@ tasks:
       CREATE TABLE IF NOT EXISTS {{render(vars.staging_table)}} (
           LIKE {{render(vars.table)}} INCLUDING ALL
       );
+  
+  - id: load_data_to_staging
+    type: io.kestra.plugin.scripts.python.Script
+    docker:
+      image: python:3.11-slim
+    beforeCommands:
+      - pip install pandas sqlalchemy psycopg2-binary pyarrow fastparquet
+    inputFiles:
+      data_file: "{{ outputs.reading_monthly_registries.outputFiles['registro_hv_'~ inputs.year_of_interest ~'_9.parquet'] }}"
+    env:
+      DB_HOST: "{{ kv('POSTGRES_HOST') }}"
+      DB_PORT: "{{ kv('POSTGRES_PORT') }}"
+      DB_NAME: "{{ kv('POSTGRES_DB') }}"
+      DB_USER: "{{ kv('POSTGRES_USER') }}"
+      DB_PASSWORD: "{{ kv('POSTGRES_PASSWORD') }}"
+    script: |
+        import pandas as pd
+        import numpy as np
+        from sqlalchemy import create_engine
+        import os
+        
+        # Connection
+        connection_string = f"postgresql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT', '5432')}/{os.getenv('DB_NAME')}"
+        engine = create_engine(connection_string)
+        
+        # Read parquet
+        df = pd.read_parquet('data_file')
+        
+        print(f"Original columns: {list(df.columns)}")
+        
+        # Clean column names - map from actual parquet columns to database columns
+        column_mapping = {
+            'no._': 'no',
+            'programa_/_aliado\n(si_aplica)': 'programa_aliado',
+            'barrio_donde_vive': 'barrio_donde_vive',
+            'tipo_documento': 'tipo_documento',
+            'número_documento': 'numero_documento',
+            'tipo_registro': 'tipo_registro',
+            'nombres': 'nombres',
+            'apellidos': 'apellidos',
+            'celular': 'celular',
+            'teléfono': 'telefono',
+            'canal_de_registro': 'canal_de_registro',
+            'edad': 'edad',
+            'rango_edad': 'rango_edad',
+            'género': 'genero',
+            'nivel_de_estudio': 'nivel_de_estudio',
+            'título_homologado': 'titulo_homologado',
+            'ciudad_de_residencia': 'ciudad_de_residencia',
+            'email': 'email',
+            'fecha_registro': 'fecha_registro',
+            'programa_de_gobierno': 'programa_de_gobierno',
+            'condiciones_especiales': 'condiciones_especiales',
+            'detalle_discapacidades': 'detalle_discapacidades',
+            'situación_laboral': 'situacion_laboral',
+            'agente_registra': 'agente_registra',
+            'fecha_actualización': 'fecha_actualizacion',
+            '%_hoja_vida': 'porcentaje_hoja_vida',
+            'prestador_anterior': 'prestador_anterior',
+            'fecha_cambio_prestador': 'fecha_cambio_prestador',
+            'vereda/localidad/centro_poblado': 'vereda_localidad_centro_poblado',
+            'pertenece_a': 'pertenece_a',
+            'sise_offline': 'sise_offline',
+            'mes': 'mes',
+            'año': 'anio',
+            'punto_atención': 'punto_atencion',
+            'fecha_accion': 'fecha_accion',
+            'grupos_etnicos': 'grupos_etnicos',
+            'vca': 'vca',
+            'discapacidad': 'discapacidad',
+            'migrante': 'migrante',
+            'vvg': 'vvg',
+            'reincorporados': 'reincorporados'
+        }
+        
+        # Rename columns
+        df = df.rename(columns=column_mapping)
+        
+        # Convert date columns with proper format
+        date_columns = ['fecha_registro', 'fecha_actualizacion', 'fecha_cambio_prestador', 'fecha_accion']
+        for col in date_columns:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], format='mixed', dayfirst=True, errors='coerce')
+        
+        # Handle numeric columns
+        numeric_columns = ['edad', 'anio', 'no', 'mes']
+        for col in numeric_columns:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # CRITICAL: Convert any remaining object/array columns to strings
+        for col in df.columns:
+            if df[col].dtype == 'object':
+                # Check if column contains arrays/lists
+                if df[col].apply(lambda x: isinstance(x, (list, np.ndarray))).any():
+                    df[col] = df[col].apply(lambda x: str(x) if isinstance(x, (list, np.ndarray)) else x)
+        
+        # Replace numpy NaN with None for proper NULL insertion
+        df = df.replace({np.nan: None})
+        
+        print(f"Loaded {len(df)} rows from parquet")
+        print(f"Mapped columns: {list(df.columns)}")
+        print(f"Data types: {df.dtypes.to_dict()}")
+        
+        # Load data into staging table
+        df.to_sql(
+            'registro_hv_staging',
+            engine,
+            if_exists='append',
+            index=False,
+            method='multi',
+            chunksize=1000
+        )
+        
+        print(f"Successfully loaded {len(df)} rows to staging table")
+  
+  - id: alter_tables_add_columns
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      ALTER TABLE {{render(vars.staging_table)}} 
+      ADD COLUMN IF NOT EXISTS unique_row_id VARCHAR(32),
+      ADD COLUMN IF NOT EXISTS filename VARCHAR(255);
+
+      ALTER TABLE {{render(vars.table)}} 
+      ADD COLUMN IF NOT EXISTS unique_row_id VARCHAR(32),
+      ADD COLUMN IF NOT EXISTS filename VARCHAR(255);
+  
+  - id: data_table_add_unique_id_and_filename
+    type: io.kestra.plugin.jdbc.postgresql.Queries
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      UPDATE {{render(vars.staging_table)}}
+      SET 
+        unique_row_id = md5(
+          COALESCE(tipo_documento, '') ||
+          COALESCE(tipo_registro, '') || 
+          COALESCE(nombres, '') || 
+          COALESCE(fecha_registro::text, '') || 
+          COALESCE(celular, '')
+        ),
+        filename = '{{render(vars.file)}}';
+
+  - id: log_staging_complete
+    type: io.kestra.core.tasks.log.Log
+    message: "Data loaded to staging table successfully"
+
+  - id: registries_merge_data
+    type: io.kestra.plugin.jdbc.postgresql.Queries
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+          MERGE INTO {{render(vars.table)}} AS T
+          USING {{render(vars.staging_table)}} AS S
+          ON T.unique_row_id = S.unique_row_id
+          WHEN NOT MATCHED THEN
+            INSERT (
+              unique_row_id, filename, programa_aliado, barrio_donde_vive, tipo_documento, numero_documento, tipo_registro, nombres, apellidos, celular, 
+              telefono, canal_de_registro, edad, rango_edad, genero, nivel_de_estudio, titulo_homologado, ciudad_de_residencia, email, 
+              fecha_registro, programa_de_gobierno, condiciones_especiales, detalle_discapacidades, situacion_laboral, agente_registra, fecha_actualizacion, 
+              porcentaje_hoja_vida, prestador_anterior, fecha_cambio_prestador, vereda_localidad_centro_poblado, pertenece_a, sise_offline, mes, anio, punto_atencion, fecha_accion, 
+              grupos_etnicos, vca, discapacidad, migrante, vvg, reincorporados, created_at
+            )
+            VALUES (
+              S.unique_row_id, S.filename, S.programa_aliado, S.barrio_donde_vive, S.tipo_documento, S.numero_documento, S.tipo_registro, S.nombres, S.apellidos, 
+              S.celular, S.telefono, S.canal_de_registro, S.edad, S.rango_edad, S.genero, S.nivel_de_estudio, S.titulo_homologado, S.ciudad_de_residencia, S.email, 
+              S.fecha_registro, S.programa_de_gobierno, S.condiciones_especiales, S.detalle_discapacidades, S.situacion_laboral, S.agente_registra, S.fecha_actualizacion, 
+              S.porcentaje_hoja_vida, S.prestador_anterior, S.fecha_cambio_prestador, S.vereda_localidad_centro_poblado, S.pertenece_a, S.sise_offline, S.mes, S.anio, 
+              S.punto_atencion, S.fecha_accion, S.grupos_etnicos, S.vca, S.discapacidad, S.migrante, S.vvg, S.reincorporados, S.created_at
+            );
+
+  - id: query_data_to_upload
+    type: io.kestra.plugin.jdbc.postgresql.Queries
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      SELECT * FROM {{render(vars.table)}};
+    store: true 
 
   - id: upload_to_gcs
     type: io.kestra.plugin.gcp.gcs.Upload
-    from: "{{ outputs.reading_monthly_registries.outputFiles['registro_hv_'~ inputs.year_of_interest ~'_10.parquet'] }}"
-    to: "gs://employment-agency-operational-data/{{ inputs.year_of_interest }}/{{ inputs.month_of_interest }}/registro_hv_{{ inputs.year_of_interest }}_10.parquet"
+    from: "{{ outputs.query_data_to_upload.uri }}"
+    to: "gs://employment-agency-operational-data/{{ inputs.year_of_interest }}/{{ inputs.month_of_interest }}/registro_hv_{{ inputs.year_of_interest }}_9.parquet"
