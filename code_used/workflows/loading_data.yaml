@@ -1,0 +1,144 @@
+id: gcs-data-pipeline
+namespace: company.data
+
+inputs:
+  - id: year_of_interest
+    type: SELECT
+    description: Year of data to process.
+    displayName: "Choose the year of interest."
+    defaults: "2025"
+    values: ["2024", "2025"]
+  
+  - id: month_of_interest
+    type: SELECT
+    description: Month of data to process.
+    displayName: "Choose the month of interest."
+    defaults: january
+    values: 
+      - january
+      - february
+      - march
+      - april
+      - may
+      - june
+      - july
+      - august
+      - september
+      - october
+      - november
+      - december
+
+variables:
+  file: "{{inputs.taxi}}_tripdata_{{trigger.date | date('yyyy-MM')}}.csv"
+  staging_table: "public.{{inputs.taxi}}_tripdata_staging"
+  table: "public.{{inputs.taxi}}_tripdata"
+
+tasks:
+  - id: download_file
+    type: io.kestra.plugin.gcp.gcs.Download
+    from: gs://operations-raw-data_public-employment-pulse/BD_Registro_2024_2025_acumulado.xlsx
+
+  # - id: process_excel
+  #   type: io.kestra.plugin.scripts.python.Script
+  #   docker:
+  #     image: python:3.11-slim
+  #   beforeCommands:
+  #     - pip install pandas openpyxl
+  #   script: |
+  #     import pandas as pd
+      
+  #     # Read the downloaded Excel file
+  #     excel_file = '{{ outputs.download_file.uri }}'
+      
+  #     # Read all sheets or specific sheet
+  #     df = pd.read_excel(excel_file, sheet_name='BD_Acumulado-2024-2025')
+      
+  #     # Display basic info
+  #     print(f"Rows: {len(df)}")
+  #     print(f"Columns: {list(df.columns)}")
+  #     print("\nFirst 5 rows:")
+  #     print(df.head())
+      
+  #     # Process your data
+  #     # Example: Save as CSV
+  #     df.to_csv('output.csv', index=False)
+
+  - id: reading_monthly_registries
+    type: io.kestra.plugin.scripts.python.Commands
+    docker:
+      image: python:3.11-slim
+    description: "identifying the data registered in {{ inputs.month_of_interest }}"
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    namespaceFiles:
+      enabled: true
+      include:
+        - "registro_hv.py"
+    beforeCommands:
+      - pip install pandas numpy datetime openpyxl pyarrow fastparquet
+    inputFiles:
+      excel_file: '{{ outputs.download_file.uri }}'
+    commands:
+      - "python registro_hv.py"
+    outputFiles:
+      - "*.parquet"
+      
+  - id: log_completion
+    type: io.kestra.core.tasks.log.Log
+    message: "Excel file processed successfully"
+
+  - id: create_tables
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ secret('POSTGRES_HOST') }}:{{ secret('POSTGRES_PORT') }}/{{ secret('POSTGRES_DB') }}
+    username: "{{ secret('POSTGRES_USER') }}"
+    password: "{{ secret('POSTGRES_PASSWORD') }}"
+    sql: |
+      -- Create main table if not exists
+      CREATE TABLE IF NOT EXISTS registro_hv (
+          id SERIAL PRIMARY KEY,
+          no INTEGER,
+          programa_aliado VARCHAR(255),
+          barrio_donde_vive VARCHAR(255),
+          tipo_documento VARCHAR(50),
+          numero_documento VARCHAR(50),
+          tipo_registro VARCHAR(50),
+          nombres VARCHAR(255),
+          apellidos VARCHAR(255),
+          celular VARCHAR(50),
+          telefono VARCHAR(50),
+          canal_de_registro VARCHAR(100),
+          edad INTEGER,
+          rango_edad VARCHAR(50),
+          genero VARCHAR(50),
+          nivel_de_estudio VARCHAR(100),
+          titulo_homologado VARCHAR(255),
+          ciudad_de_residencia VARCHAR(100),
+          email VARCHAR(255),
+          fecha_registro DATE,
+          programa_de_gobierno VARCHAR(255),
+          condiciones_especiales TEXT,
+          detalle_discapacidades TEXT,
+          situacion_laboral VARCHAR(100),
+          agente_registra VARCHAR(255),
+          fecha_actualizacion DATE,
+          porcentaje_hoja_vida VARCHAR(20),
+          prestador_anterior VARCHAR(255),
+          fecha_cambio_prestador DATE,
+          vereda_localidad_centro_poblado VARCHAR(255),
+          pertenece_a VARCHAR(100),
+          sise_offline VARCHAR(50),
+          mes VARCHAR(20),
+          anio INTEGER,
+          punto_atencion VARCHAR(255),
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+      
+      -- Create staging table
+      CREATE TABLE IF NOT EXISTS registro_hv_staging (
+          LIKE registro_hv INCLUDING ALL
+      );
+
+  - id: upload_to_gcs
+    type: io.kestra.plugin.gcp.gcs.Upload
+    from: "{{ outputs.reading_monthly_registries.outputFiles['registro_hv_'~ inputs.year_of_interest ~'_10.parquet'] }}"
+    to: "gs://employment-agency-operational-data/{{ inputs.year_of_interest }}/{{ inputs.month_of_interest }}/registro_hv_{{ inputs.year_of_interest }}_10.parquet"
