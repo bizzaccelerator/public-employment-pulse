@@ -79,5 +79,7 @@ module "pgadmin_cloudrun" {
   pgadmin_email    = var.pgadmin_email
   pgadmin_password = var.pgadmin_password
   invoker_identity = "allUsers"
+  vpc_connector_id = module.vpc_connector.connector_id
+  depends_on = [module.vpc_connector, module.cloudsql_postgres]
 }
 

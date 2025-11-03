@@ -1,7 +1,14 @@
 id: gcs-data-pipeline
-namespace: company.data
+namespace: public_employment_pulse
 
 inputs:
+  - id: data_processed
+    type: SELECT
+    description: Data of interest processed.
+    displayName: "Choose the data of interest."
+    defaults: registro_hv
+    values: [ registro_hv, orientacion, intermediacion, vacantes, empresas ]
+
   - id: year_of_interest
     type: SELECT
     description: Year of data to process.
@@ -29,9 +36,8 @@ inputs:
       - december
 
 variables:
-  file: "{{inputs.taxi}}_tripdata_{{trigger.date | date('yyyy-MM')}}.csv"
-  staging_table: "public.{{inputs.taxi}}_tripdata_staging"
-  table: "public.{{inputs.taxi}}_tripdata"
+  staging_table: "public.{{inputs.data_processed}}_staging"
+  table: "public.{{inputs.data_processed}}"
 
 tasks:
   - id: download_file
@@ -89,12 +95,12 @@ tasks:
 
   - id: create_tables
     type: io.kestra.plugin.jdbc.postgresql.Query
-    url: jdbc:postgresql://{{ secret('POSTGRES_HOST') }}:{{ secret('POSTGRES_PORT') }}/{{ secret('POSTGRES_DB') }}
-    username: "{{ secret('POSTGRES_USER') }}"
-    password: "{{ secret('POSTGRES_PASSWORD') }}"
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
     sql: |
       -- Create main table if not exists
-      CREATE TABLE IF NOT EXISTS registro_hv (
+      CREATE TABLE IF NOT EXISTS {{render(vars.table)}} (
           id SERIAL PRIMARY KEY,
           no INTEGER,
           programa_aliado VARCHAR(255),
@@ -114,16 +120,16 @@ tasks:
           titulo_homologado VARCHAR(255),
           ciudad_de_residencia VARCHAR(100),
           email VARCHAR(255),
-          fecha_registro DATE,
+          fecha_registro TIMESTAMP,
           programa_de_gobierno VARCHAR(255),
           condiciones_especiales TEXT,
           detalle_discapacidades TEXT,
           situacion_laboral VARCHAR(100),
           agente_registra VARCHAR(255),
-          fecha_actualizacion DATE,
+          fecha_actualizacion TIMESTAMP,
           porcentaje_hoja_vida VARCHAR(20),
           prestador_anterior VARCHAR(255),
-          fecha_cambio_prestador DATE,
+          fecha_cambio_prestador TIMESTAMP,
           vereda_localidad_centro_poblado VARCHAR(255),
           pertenece_a VARCHAR(100),
           sise_offline VARCHAR(50),
@@ -132,10 +138,10 @@ tasks:
           punto_atencion VARCHAR(255),
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
-      
+
       -- Create staging table
-      CREATE TABLE IF NOT EXISTS registro_hv_staging (
-          LIKE registro_hv INCLUDING ALL
+      CREATE TABLE IF NOT EXISTS {{render(vars.staging_table)}} (
+          LIKE {{render(vars.table)}} INCLUDING ALL
       );
 
   - id: upload_to_gcs
