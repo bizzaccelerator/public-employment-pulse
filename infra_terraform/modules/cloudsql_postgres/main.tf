@@ -16,15 +16,31 @@ resource "google_sql_database_instance" "postgres_instance" {
   depends_on = [var.peering_dependency]
 
   deletion_protection = false
+
+  lifecycle {
+    prevent_destroy = false
+  }
 }
 
 resource "google_sql_user" "postgres_user" {
   name     = var.db_user
   instance = google_sql_database_instance.postgres_instance.name
   password = var.db_password
+
+  deletion_policy = "ABANDON"
+  
+  lifecycle {
+    prevent_destroy = false
+  }
 }
 
 resource "google_sql_database" "app_db" {
   name     = var.db_name
   instance = google_sql_database_instance.postgres_instance.name
+  
+  deletion_policy = "ABANDON"
+  
+  lifecycle {
+    prevent_destroy = false
+  }
 }
