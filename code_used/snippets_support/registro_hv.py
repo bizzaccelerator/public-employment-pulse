@@ -67,35 +67,68 @@ valid['género'] = valid['género'].replace({'m':'M','f':'F'})
 
 
 # # FECHAS DE REGISTRO
-valid['fecha_registro'] = valid['fecha_registro'].fillna("")
-valid['fecha_actualización'] = valid['fecha_actualización'].fillna("")
+# Ensure all date columns are treated as strings for consistent parsing
+date_columns = ['fecha_registro', 'fecha_actualización', 'fecha_cambio_prestador']
 
 # Function to handle different date formats
 def parse_dates(date_str):
-    if pd.isna(date_str) or date_str == "":  # Handle empty strings or NaN
+    if pd.isna(date_str) or date_str == "" or str(date_str).strip() == "":
         return pd.NaT
     
     date_str = str(date_str).strip()
     
-    # Case 1: Excel serial number
-    if date_str.isdigit():
-        return pd.to_datetime(int(date_str), origin='1899-12-30', unit='D')
-
-    # Case 2: DD-MM-YYYY format
+    # Case 1: Excel serial number (pure digits or float representation)
+    # Check if it's a number (could be "45679" or "45679.0")
     try:
-        return pd.to_datetime(date_str, format="%d-%m-%Y")
+        excel_num = float(date_str)
+        # If it's a valid Excel serial number (typically between 1 and 50000+)
+        if excel_num > 0 and '/' not in date_str and '-' not in date_str:
+            # Excel's base date is December 30, 1899
+            # No adjustment needed for modern dates
+            base_date = datetime(1899, 12, 30)
+            return base_date + timedelta(days=excel_num)
     except ValueError:
-        pass  # If it fails, try the next method
+        pass  # Not a number, continue to other formats
     
-    # Case 3: Other datetime formats
-    return pd.to_datetime(date_str, errors='coerce', dayfirst=True)  
+    # Case 2: Format with slashes and time (DD/MM/YYYY with potential time)
+    if '/' in date_str:
+        try:
+            # Remove the periods and extra spaces from "p. m." or "a. m."
+            date_str_cleaned = date_str.replace(' p. m.', ' PM').replace(' a. m.', ' AM')
+            
+            # Try parsing with time component first
+            if 'PM' in date_str_cleaned or 'AM' in date_str_cleaned:
+                return pd.to_datetime(date_str_cleaned, format="%d/%m/%Y %I:%M:%S %p")
+            
+            # Try without time component - explicitly parse DD/MM/YYYY
+            parts = date_str.split()[0].split('/')  # Get date part only
+            if len(parts) == 3:
+                day, month, year = parts
+                return pd.to_datetime(f"{year}-{month}-{day}", format="%Y-%m-%d")
+        except (ValueError, IndexError):
+            pass
+    
+    # Case 3: DD-MM-YYYY format (with dashes)
+    if '-' in date_str and len(date_str.split('-')) == 3:
+        try:
+            parts = date_str.split('-')
+            # Check if it looks like DD-MM-YYYY (day would be <= 31)
+            if len(parts[0]) <= 2 and int(parts[0]) <= 31:
+                day, month, year = parts
+                return pd.to_datetime(f"{year}-{month}-{day}", format="%Y-%m-%d")
+        except (ValueError, IndexError):
+            pass
+    
+    # Case 4: Fallback - return NaT for unparseable dates
+    return pd.NaT
 
 # Convert date columns
-valid['fecha_registro'] = valid['fecha_registro'].apply(parse_dates)
-valid['fecha_actualización'] = valid['fecha_actualización'].apply(parse_dates)
+for col in date_columns:
+    valid[col] = valid[col].fillna("").astype(str)
+    valid[col] = valid[col].apply(parse_dates)
 
 # Get the latest date
-valid['fecha_accion'] = valid[['fecha_registro', 'fecha_actualización']].max(axis=1)
+valid['fecha_accion'] = valid[['fecha_registro', 'fecha_actualización', 'fecha_cambio_prestador']].max(axis=1)
 
 # Floor the date to remove time (ensures it's still a datetime object)
 valid['fecha_accion'] = valid['fecha_accion'].dt.floor('D')
