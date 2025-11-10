@@ -100,8 +100,9 @@ valid['fecha_accion'] = valid[['fecha_registro', 'fecha_actualización']].max(ax
 # Floor the date to remove time (ensures it's still a datetime object)
 valid['fecha_accion'] = valid['fecha_accion'].dt.floor('D')
 
-
-
+# Calculate real month of action
+valid = valid.drop('mes', axis=1)
+valid['mes'] = valid['fecha_accion'].dt.month
 
 # # PREPARING FOR POPULATION ANALYSIS
 
