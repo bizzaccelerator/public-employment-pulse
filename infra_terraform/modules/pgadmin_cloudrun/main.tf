@@ -6,6 +6,8 @@ resource "google_cloud_run_service" "pgadmin" {
     metadata {
       annotations = {
         "autoscaling.knative.dev/initial-scale" = "1"
+        "run.googleapis.com/vpc-access-connector" = var.vpc_connector_id
+        "run.googleapis.com/vpc-access-egress"    = "private-ranges-only"
       }
     }
     spec {
