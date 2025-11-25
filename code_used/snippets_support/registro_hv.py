@@ -1,19 +1,12 @@
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
+import os
 
 # inputs 
 # The new registries for this months are
-today = datetime.today()
-
-if today.month == 1:
-    prev_month = 12
-    prev_year = today.year - 1
-else:
-    prev_month = today.month - 1
-    prev_year = today.year
-
-
+prev_month = int(os.getenv('MONTH'))
+prev_year = int(os.getenv('YEAR'))
 
 # data handling
 registro = pd.read_excel('excel_file',sheet_name='BD_Acumulado-2024-2025')
@@ -54,54 +47,83 @@ valid = registro[~registro.index.isin(to_revisit)]
 valid = valid[valid['año']==prev_year]
 
 
-print(valid.info())
-
-
 # Cleaning NaN data. Data as 'nan' are not actual "NaN":
 for column in valid.columns:
     valid[column] = valid[column].replace('nan', pd.NA)
 
-
 # Clean gender
 valid['género'] = valid['género'].replace({'m':'M','f':'F'})
 
-
 # # FECHAS DE REGISTRO
-valid['fecha_registro'] = valid['fecha_registro'].fillna("")
-valid['fecha_actualización'] = valid['fecha_actualización'].fillna("")
+# Ensure all date columns are treated as strings for consistent parsing
+date_columns = ['fecha_registro', 'fecha_actualización', 'fecha_cambio_prestador']
 
 # Function to handle different date formats
 def parse_dates(date_str):
-    if pd.isna(date_str) or date_str == "":  # Handle empty strings or NaN
+    if pd.isna(date_str) or date_str == "" or str(date_str).strip() == "":
         return pd.NaT
     
     date_str = str(date_str).strip()
     
-    # Case 1: Excel serial number
-    if date_str.isdigit():
-        return pd.to_datetime(int(date_str), origin='1899-12-30', unit='D')
-
-    # Case 2: DD-MM-YYYY format
+    # Case 1: Excel serial number (pure digits or float representation)
+    # Check if it's a number (could be "45679" or "45679.0")
     try:
-        return pd.to_datetime(date_str, format="%d-%m-%Y")
+        excel_num = float(date_str)
+        # If it's a valid Excel serial number (typically between 1 and 50000+)
+        if excel_num > 0 and '/' not in date_str and '-' not in date_str:
+            # Excel's base date is December 30, 1899
+            # No adjustment needed for modern dates
+            base_date = datetime(1899, 12, 30)
+            return base_date + timedelta(days=excel_num)
     except ValueError:
-        pass  # If it fails, try the next method
+        pass  # Not a number, continue to other formats
     
-    # Case 3: Other datetime formats
-    return pd.to_datetime(date_str, errors='coerce', dayfirst=True)  
+    # Case 2: Format with slashes and time (DD/MM/YYYY with potential time)
+    if '/' in date_str:
+        try:
+            # Remove the periods and extra spaces from "p. m." or "a. m."
+            date_str_cleaned = date_str.replace(' p. m.', ' PM').replace(' a. m.', ' AM')
+            
+            # Try parsing with time component first
+            if 'PM' in date_str_cleaned or 'AM' in date_str_cleaned:
+                return pd.to_datetime(date_str_cleaned, format="%d/%m/%Y %I:%M:%S %p")
+            
+            # Try without time component - explicitly parse DD/MM/YYYY
+            parts = date_str.split()[0].split('/')  # Get date part only
+            if len(parts) == 3:
+                day, month, year = parts
+                return pd.to_datetime(f"{year}-{month}-{day}", format="%Y-%m-%d")
+        except (ValueError, IndexError):
+            pass
+    
+    # Case 3: DD-MM-YYYY format (with dashes)
+    if '-' in date_str and len(date_str.split('-')) == 3:
+        try:
+            parts = date_str.split('-')
+            # Check if it looks like DD-MM-YYYY (day would be <= 31)
+            if len(parts[0]) <= 2 and int(parts[0]) <= 31:
+                day, month, year = parts
+                return pd.to_datetime(f"{year}-{month}-{day}", format="%Y-%m-%d")
+        except (ValueError, IndexError):
+            pass
+    
+    # Case 4: Fallback - return NaT for unparseable dates
+    return pd.NaT
 
 # Convert date columns
-valid['fecha_registro'] = valid['fecha_registro'].apply(parse_dates)
-valid['fecha_actualización'] = valid['fecha_actualización'].apply(parse_dates)
+for col in date_columns:
+    valid[col] = valid[col].fillna("").astype(str)
+    valid[col] = valid[col].apply(parse_dates)
 
 # Get the latest date
-valid['fecha_accion'] = valid[['fecha_registro', 'fecha_actualización']].max(axis=1)
+valid['fecha_accion'] = valid[['fecha_registro', 'fecha_actualización', 'fecha_cambio_prestador']].max(axis=1)
 
 # Floor the date to remove time (ensures it's still a datetime object)
 valid['fecha_accion'] = valid['fecha_accion'].dt.floor('D')
 
-
-
+# Calculate real month of action
+valid = valid.drop('mes', axis=1)
+valid['mes'] = valid['fecha_accion'].dt.month
 
 # # PREPARING FOR POPULATION ANALYSIS
 
@@ -225,17 +247,6 @@ valid['reincorporados'] = valid['reincorporados'].replace("", np.nan)
 
 print(valid['%_hoja_vida'].apply(type).unique())
 
-# The new registries for this months are
-today = datetime.today()
-
-if today.month == 1:
-    prev_month = 12
-    prev_year = today.year - 1
-else:
-    prev_month = today.month - 1
-    prev_year = today.year
-
-
 # Hojas de Vida autoregistro
 fr_autoregistro = (pd.to_datetime(valid['fecha_accion']).dt.month == prev_month) & (valid['canal_de_registro'] == 'Autoregistro') & (valid['tipo_registro'] == 'Registro_nuevo') & (pd.to_datetime(valid['fecha_accion']).dt.year == prev_year)
 
@@ -297,8 +308,12 @@ print(f"El número de HV actualizadas para jovenes durante el mes {prev_month} e
 
 
 # Exporting the data
-# prev_year = 2024
-# valid = valid[(pd.to_datetime(valid['año']) == prev_year)]
 valid = valid[(pd.to_datetime(valid['fecha_accion']).dt.month == prev_month) & (pd.to_datetime(valid['fecha_accion']).dt.year == prev_year)]
-# valid.to_parquet(f'registro_hv_2024.parquet', compression='zstd')
 valid.to_parquet(f'registro_hv_{prev_year}_{prev_month}.parquet', compression='zstd')
+
+# Counting the number of valid records processed
+num_valid_records = valid.shape[0]
+print(f"Number of valid records processed for {prev_month}/{prev_year}: {num_valid_records}")
+# Output the count
+with open('record_count.txt', 'w') as f:
+    f.write(str(num_valid_records))
