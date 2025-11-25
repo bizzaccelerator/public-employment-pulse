@@ -1,4 +1,4 @@
-id: gcs-data-pipeline
+id: gcs-data-pipeline_backfills
 namespace: public_employment_pulse
 
 inputs:
@@ -8,37 +8,13 @@ inputs:
     displayName: "Choose the data of interest."
     defaults: registro_hv
     values: [ registro_hv, orientacion, intermediacion, vacantes, empresas ]
-
-  - id: year_of_interest
-    type: SELECT
-    description: Year of data to process.
-    displayName: "Choose the year of interest."
-    defaults: "2025"
-    values: [ "2024", "2025" ]
-
-  - id: month_of_interest
-    type: SELECT
-    description: Month of data to process.
-    displayName: "Choose the month of interest."
-    defaults: january
-    values:
-      - january
-      - february
-      - march
-      - april
-      - may
-      - june
-      - july
-      - august
-      - september
-      - october
-      - november
-      - december
-
+    
 variables:
   staging_table: "public.{{inputs.data_processed}}_staging"
   table: "public.{{inputs.data_processed}}"
-  file: "{{inputs.data_processed}}_{{ inputs.year_of_interest}}_{{inputs.month_of_interest}}"
+  file: "{{inputs.data_processed}}_{{ trigger.date | date('yyyy_M') }}"
+  month_name: "{{ trigger.date | date('MMMM') | lower }}"
+  month_padded: "{{ '%02d' | format( trigger.date | date('M') ) }}"
 
 tasks:
   - id: download_file
@@ -49,19 +25,22 @@ tasks:
     type: io.kestra.plugin.scripts.python.Commands
     docker:
       image: python:3.11-slim
-    description: "identifying the data registered in {{ inputs.month_of_interest }}"
+    description: "identifying the data of CVs registered in {{ vars.month_name }}"
     taskRunner:
       type: io.kestra.plugin.core.runner.Process
     namespaceFiles:
       enabled: true
       include:
-        - "registro_hv.py"
+        - "registro_hv_updated.py"
     beforeCommands:
       - pip install pandas numpy datetime openpyxl pyarrow fastparquet
     inputFiles:
       excel_file: '{{ outputs.download_file.uri }}'
+    env:
+      MONTH: "{{ trigger.date | date('M') }}"
+      YEAR: "{{ trigger.date | date('yyyy') }}"
     commands:
-      - "python registro_hv.py"
+      - "python registro_hv_updated.py"
     outputFiles:
       - "*.parquet"
 
@@ -143,7 +122,7 @@ tasks:
     beforeCommands:
       - pip install pandas sqlalchemy psycopg2-binary pyarrow fastparquet
     inputFiles:
-      data_file: "{{ outputs.reading_monthly_registries.outputFiles['registro_hv_'~ inputs.year_of_interest ~'_10.parquet'] }}"
+      data_file: "{{ outputs.reading_monthly_registries.outputFiles['registro_hv_' + trigger.date | date('yyyy_M') + '.parquet'] }}"
     env:
       DB_HOST: "{{ kv('POSTGRES_HOST') }}"
       DB_PORT: "{{ kv('POSTGRES_PORT') }}"
@@ -311,6 +290,48 @@ tasks:
               S.punto_atencion, S.fecha_accion, S.grupos_etnicos, S.vca, S.discapacidad, S.migrante, S.vvg, S.reincorporados, S.created_at
             );
 
+  - id: identify_incomplete_data
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      SELECT 
+        unique_row_id, 
+        numero_documento,
+        CASE 
+          WHEN edad IS NULL THEN 'edad'
+          WHEN genero IS NULL THEN 'genero'
+          WHEN edad IS NULL AND genero IS NULL THEN 'edad y genero'
+        END AS missing_field
+      FROM registro_hv_staging
+      WHERE edad IS NULL OR genero IS NULL;
+    fetchType: STORE
+
+  - id: convert_incomplete_to_csv
+    type: "io.kestra.plugin.serdes.csv.IonToCsv"
+    from: "{{ outputs.identify_incomplete_data.uri }}"
+  
+  - id: send_email_with_attachment
+    type: io.kestra.plugin.notifications.mail.MailSend
+    from: "{{ kv('SENDER_EMAIL') }}"
+    to: "{{ kv('RECIPIENT_EMAILS') }}"
+    subject: "Incomplete Data Report - {{ trigger.date | date('yyyy_M') }}"
+    htmlTextContent: |
+      <h2>Incomplete Data Report</h2>
+      <p>Please find attached the incomplete data report for <strong>{{ trigger.date | date('yyyy_M') }}</strong>.</p>
+      <p><strong>Total records with missing edad field:</strong> {{ outputs.identify_incomplete_data.size }}</p>
+      <p>Please review and take appropriate action.</p>
+    attachments:
+      - name: incomplete_data_{{ trigger.date | date('yyyy_M') }}.csv
+        uri: "{{ outputs.convert_incomplete_to_csv.uri }}"
+        contentType: text/csv
+    host: "{{ kv('SMTP_SERVER') }}"
+    port: "{{ kv('SMTP_PORT') }}"
+    username: "{{ kv('GMAIL_USERNAME') }}"
+    password: "{{ kv('GMAIL_APP_PASSWORD') }}"
+    transportStrategy: SMTP_TLS
+
   - id: query_data_to_upload
     type: io.kestra.plugin.jdbc.postgresql.Query
     url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
@@ -362,7 +383,7 @@ tasks:
         COALESCE(filename, '') as filename,
         COALESCE(created_at, '1970-01-01') as created_at
       FROM {{render(vars.table)}}
-      WHERE mes = 10 AND anio = {{ inputs.year_of_interest }};
+      WHERE mes = {{ trigger.date | date('M') }} AND anio = {{ trigger.date | date('yyyy') }};
     store: true 
   
   - id: convert_monthly_data_to_parquet
@@ -372,79 +393,11 @@ tasks:
   - id: upload_monthly_data_to_gcs
     type: io.kestra.plugin.gcp.gcs.Upload
     from: "{{ outputs.convert_monthly_data_to_parquet.uri }}"
-    to: "gs://employment-agency-operational-data/{{ inputs.year_of_interest }}/{{ inputs.month_of_interest }}/registro_hv_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}.parquet"
+    to: "gs://employment-agency-operational-data/{{ inputs.data_processed }}/{{ trigger.date | date('yyyy') }}/{{ vars.month_name }}/registro_hv_{{ trigger.date | date('yyyy') }}_{{ trigger.date | date('M') }}.parquet"
 
-  # - id: export_monthly_data_to_parquet
-  #   type: io.kestra.plugin.scripts.python.Script
-  #   docker:
-  #     image: python:3.11-slim
-  #   description: "Export PostgreSQL data to Parquet format"
-  #   beforeCommands:
-  #     - pip install pandas sqlalchemy psycopg2-binary pyarrow fastparquet
-  #   env:
-  #     DB_HOST: "{{ kv('POSTGRES_HOST') }}"
-  #     DB_PORT: "{{ kv('POSTGRES_PORT') }}"
-  #     DB_NAME: "{{ kv('POSTGRES_DB') }}"
-  #     DB_USER: "{{ kv('POSTGRES_USER') }}"
-  #     DB_PASSWORD: "{{ kv('POSTGRES_PASSWORD') }}"
-  #     YEAR: "{{ inputs.year_of_interest }}"
-  #     MONTH: "{{ inputs.month_of_interest }}"
-  #     TABLE_NAME: "{{ render(vars.table) }}"
-  #   script: |
-  #     import pandas as pd
-  #     import numpy as np
-  #     from sqlalchemy import create_engine
-  #     import os
-      
-  #     # Database connection
-  #     connection_string = f"postgresql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT', '5432')}/{os.getenv('DB_NAME')}"
-  #     engine = create_engine(connection_string)
-      
-  #     # Query data from the main table
-  #     table_name = os.getenv('TABLE_NAME')
-  #     year = os.getenv('YEAR')
-  #     month = os.getenv('MONTH')
-      
-  #     query = f"SELECT * FROM {table_name}"
-      
-  #     print(f"Executing query: {query}")
-      
-  #     # Read data into DataFrame
-  #     df = pd.read_sql(query, engine)
-      
-  #     print(f"Retrieved {len(df)} rows from {table_name}")
-  #     print(f"Columns: {list(df.columns)}")
-      
-  #     # Optimize data types for Parquet
-  #     # Convert datetime columns to proper datetime type
-  #     date_columns = ['fecha_registro', 'fecha_actualizacion', 'fecha_cambio_prestador', 'fecha_accion', 'created_at']
-  #     for col in date_columns:
-  #         if col in df.columns:
-  #             df[col] = pd.to_datetime(df[col], errors='coerce')
-      
-  #     # Convert integer columns
-  #     int_columns = ['id', 'no', 'edad', 'mes', 'anio']
-  #     for col in int_columns:
-  #         if col in df.columns:
-  #             df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
-      
-  #     # Generate filename
-  #     output_filename = f"registro_hv_{year}_{month}.parquet"
-      
-  #     # Save to Parquet with optimal compression
-  #     df.to_parquet(
-  #         output_filename,
-  #         engine='pyarrow',
-  #         compression='snappy',
-  #         index=False
-  #     )
-      
-  #     print(f"Successfully saved {len(df)} rows to {output_filename}")
-  #     print(f"File size: {os.path.getsize(output_filename) / (1024*1024):.2f} MB")
-  #   outputFiles:
-  #     - "*.parquet"
-
-  # - id: upload_monthly_data_to_gcs
-  #   type: io.kestra.plugin.gcp.gcs.Upload
-  #   from: "{{ outputs.export_monthly_data_to_parquet.outputFiles['registro_hv_'~ inputs.year_of_interest ~'_'~ inputs.month_of_interest ~'.parquet'] }}"
-  #   to: "gs://employment-agency-operational-data/{{ inputs.year_of_interest }}/{{ inputs.month_of_interest }}/registro_hv_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}.parquet"
+triggers:
+  - id: registries_hv_monthly_trigger
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 20 5 * *"
+    inputs:
+      data_processed: registro_hv

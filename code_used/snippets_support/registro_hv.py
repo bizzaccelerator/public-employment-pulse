@@ -1,19 +1,12 @@
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+import os
 
 # inputs 
 # The new registries for this months are
-today = datetime.today()
-
-if today.month == 1:
-    prev_month = 12
-    prev_year = today.year - 1
-else:
-    prev_month = today.month - 1
-    prev_year = today.year
-
-
+prev_month = int(os.getenv('MONTH'))
+prev_year = int(os.getenv('YEAR'))
 
 # data handling
 registro = pd.read_excel('excel_file',sheet_name='BD_Acumulado-2024-2025')
@@ -54,17 +47,12 @@ valid = registro[~registro.index.isin(to_revisit)]
 valid = valid[valid['año']==prev_year]
 
 
-print(valid.info())
-
-
 # Cleaning NaN data. Data as 'nan' are not actual "NaN":
 for column in valid.columns:
     valid[column] = valid[column].replace('nan', pd.NA)
 
-
 # Clean gender
 valid['género'] = valid['género'].replace({'m':'M','f':'F'})
-
 
 # # FECHAS DE REGISTRO
 # Ensure all date columns are treated as strings for consistent parsing
@@ -259,17 +247,6 @@ valid['reincorporados'] = valid['reincorporados'].replace("", np.nan)
 
 print(valid['%_hoja_vida'].apply(type).unique())
 
-# The new registries for this months are
-today = datetime.today()
-
-if today.month == 1:
-    prev_month = 12
-    prev_year = today.year - 1
-else:
-    prev_month = today.month - 1
-    prev_year = today.year
-
-
 # Hojas de Vida autoregistro
 fr_autoregistro = (pd.to_datetime(valid['fecha_accion']).dt.month == prev_month) & (valid['canal_de_registro'] == 'Autoregistro') & (valid['tipo_registro'] == 'Registro_nuevo') & (pd.to_datetime(valid['fecha_accion']).dt.year == prev_year)
 
@@ -331,8 +308,12 @@ print(f"El número de HV actualizadas para jovenes durante el mes {prev_month} e
 
 
 # Exporting the data
-# prev_year = 2024
-# valid = valid[(pd.to_datetime(valid['año']) == prev_year)]
 valid = valid[(pd.to_datetime(valid['fecha_accion']).dt.month == prev_month) & (pd.to_datetime(valid['fecha_accion']).dt.year == prev_year)]
-# valid.to_parquet(f'registro_hv_2024.parquet', compression='zstd')
 valid.to_parquet(f'registro_hv_{prev_year}_{prev_month}.parquet', compression='zstd')
+
+# Counting the number of valid records processed
+num_valid_records = valid.shape[0]
+print(f"Number of valid records processed for {prev_month}/{prev_year}: {num_valid_records}")
+# Output the count
+with open('record_count.txt', 'w') as f:
+    f.write(str(num_valid_records))
