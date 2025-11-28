@@ -1,4 +1,4 @@
-id: gcs-data-pipeline
+id: cv-raw-data-pipeline
 namespace: public_employment_pulse
 
 inputs:
