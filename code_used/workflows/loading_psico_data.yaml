@@ -90,19 +90,20 @@ tasks:
     sql: |
       -- Create main table if not exists
       CREATE TABLE IF NOT EXISTS {{render(vars.table)}} (
-          numerodocumento VARCHAR(50) PRIMARY KEY,
+          id SERIAL PRIMARY KEY,
+          numerodocumento VARCHAR(50),
           fechaagendamiento_orientacion TIMESTAMP,
           fechaejecucion_orientacion TIMESTAMP,
           fechaevaluacion_orientacion TIMESTAMP,
           orientador VARCHAR(200),
           mes_orientado INTEGER,
-          año_orientado INTEGER,
+          anio_orientado INTEGER,
           fechaagendamiento_taller TIMESTAMP,
           fechaejecucion_taller TIMESTAMP,
           fechaevaluacion_taller TIMESTAMP,
           tallerista VARCHAR(200),
           mes_taller INTEGER,
-          año_taller INTEGER,
+          anio_taller INTEGER,
           indicador VARCHAR(100),
           tipodireccionamiento VARCHAR(100),
           tipodocumento VARCHAR(50),
@@ -264,12 +265,49 @@ tasks:
         
         # Load data into staging table
         df.to_sql(
-            'orientacion_hv_staging',
+            'orientacion_staging',
             engine,
             if_exists='append',
             index=False,
             method='multi',
-            chunksize=1000
+            chunksize=100
         )
         
         print(f"Successfully loaded {len(df)} rows to staging table")
+  
+  - id: alter_psico_tables_add_columns
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      ALTER TABLE {{render(vars.staging_table)}} 
+      ADD COLUMN IF NOT EXISTS unique_row_id VARCHAR(32),
+      ADD COLUMN IF NOT EXISTS filename VARCHAR(255);
+
+      ALTER TABLE {{render(vars.table)}} 
+      ADD COLUMN IF NOT EXISTS unique_row_id VARCHAR(32),
+      ADD COLUMN IF NOT EXISTS filename VARCHAR(255);
+  
+  - id: data_table_add_unique_id_and_filename
+    type: io.kestra.plugin.jdbc.postgresql.Queries
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      UPDATE {{render(vars.staging_table)}}
+      SET 
+        unique_row_id = md5(
+          COALESCE(numerodocumento, '') ||
+          COALESCE(primerapellido, '') || 
+          COALESCE(primernombre, '') || 
+          COALESCE(fechaejecucion_orientacion::text, '') || 
+          COALESCE(numerotelefono, '')
+        ),
+        filename = '{{render(vars.file)}}';
+
+  - id: log_staging_complete
+    type: io.kestra.core.tasks.log.Log
+    message: "Data loaded to staging table successfully"
+
+
