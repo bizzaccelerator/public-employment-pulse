@@ -353,3 +353,77 @@ tasks:
     username: "{{ kv('GMAIL_USERNAME') }}"
     password: "{{ kv('GMAIL_APP_PASSWORD') }}"
     transportStrategy: SMTP_TLS
+  
+
+  - id: query_monthly_data_to_upload
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      SELECT
+        COALESCE(id, '0') as id,
+        COALESCE(numerodocumento::text, '0') as numerodocumento,
+        COALESCE(fechaagendamiento_orientacion, '1970-01-01') as fechaagendamiento_orientacion,
+        COALESCE(fechaejecucion_orientacion, '1970-01-01') as fechaejecucion_orientacion,
+        COALESCE(fechaevaluacion_orientacion, '1970-01-01') as fechaevaluacion_orientacion,
+        COALESCE(orientador, '') as orientador,
+        COALESCE(mes_orientado, 0) as mes_orientado,
+        COALESCE(anio_orientado, 0) as anio_orientado,
+        COALESCE(fechaagendamiento_taller, '1970-01-01') as fechaagendamiento_taller, 
+        COALESCE(fechaejecucion_taller, '1970-01-01') as fechaejecucion_taller,
+        COALESCE(fechaevaluacion_taller, '1970-01-01') as fechaevaluacion_taller,
+        COALESCE(tallerista, '') as  tallerista,
+        COALESCE(mes_taller, 0) as mes_taller, 
+        COALESCE(anio_taller, 0) as anio_taller, 
+        COALESCE(indicador, '') as indicador,
+        COALESCE(tipodireccionamiento, '') as tipodireccionamiento, 
+        COALESCE(tipodocumento, '') as tipo_documento,
+        COALESCE(correoelectronico, '') as correoelectronico,
+        COALESCE(primernombre, '') as primernombre,
+        COALESCE(segundonombre, '') as segundonombre,
+        COALESCE(primerapellido, '') as primerapellido,
+        COALESCE(segundoapellido, '') as segundoapellido, 
+        COALESCE(sexo, '') as sexo,
+        COALESCE(ciudad, '') as ciudad,
+        COALESCE(departamento, '') as departamento,
+        COALESCE(area, '') as area,
+        COALESCE(tipo, '') as tipo, 
+        COALESCE(subtipo, '') as  subtipo, 
+        COALESCE(nombreportafolio, '') as nombreportafolio, 
+        COALESCE(nombreconvocatoria, '') as nombreconvocatoria, 
+        COALESCE(aprobacion, '') as aprobacion, 
+        COALESCE(porcentajeasistencia::text, '') as porcentajeasistencia, 
+        COALESCE(prestadornombre, '') as prestadornombre,
+        COALESCE(institucionnombre, '') as institucionnombre,
+        COALESCE(instituciondireccion, '') as instituciondireccion,
+        COALESCE(institucionmunicipio, '') as institucionmunicipio,
+        COALESCE(instituciondepartamento, '') as instituciondepartamento,
+        COALESCE(programagobiernosino::text, '') as programagobiernosino,
+        COALESCE(programagobierno::text, '') as programagobierno,
+        COALESCE(alianzasentidadesexternas, '') as alianzasentidadesexternas,
+        COALESCE(agencianombre, '') as agencianombre,
+        COALESCE(numerotelefono,'0') as numerotelefono,
+        COALESCE(programa_de_gobierno, '') as programa_de_gobierno,
+        COALESCE(condiciones_especiales, '') as condiciones_especiales,
+        COALESCE(edad, 0) as edad,
+        COALESCE(rango_de_edad, '0') as rango_de_edad,
+        COALESCE(grupos_etnicos, '') as grupos_etnicos,
+        COALESCE(vca, '') as  vca,
+        COALESCE(discapacidad, '') as discapacidad,
+        COALESCE(migrante, '') as migrante,
+        COALESCE(vvg, '') as vvg,
+        COALESCE(reincorporados, '') as reincorporados,
+        COALESCE(created_at, '1970-01-01') as created_at
+      FROM {{render(vars.staging_table)}}
+      WHERE mes_orientado = {{ inputs.month_of_interest }} AND anio_orientado = {{ inputs.year_of_interest }};
+    store: true
+  
+  - id: convert_monthly_data_to_parquet
+    type: io.kestra.plugin.serdes.parquet.IonToParquet
+    from: "{{ outputs.query_monthly_data_to_upload.uri }}"
+  
+  - id: upload_monthly_data_to_gcs
+    type: io.kestra.plugin.gcp.gcs.Upload
+    from: "{{ outputs.convert_monthly_data_to_parquet.uri }}"
+    to: "gs://employment-agency-operational-data/{{ inputs.data_processed }}/{{ inputs.year_of_interest }}/{{ vars.month_name }}/orientacion_hv_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}.parquet"
