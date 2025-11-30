@@ -111,7 +111,7 @@ tasks:
           observacion_gestion TEXT,
           observacion_del_candidato TEXT,
           mes_de_colocacion_en_plataforma VARCHAR(50),
-          colocado BOOLEAN,
+          colocado INTEGER,
           semana_publicacion_vacante INTEGER,
           mes_publicacion_vacante VARCHAR(50),
           tipo_de_vacante VARCHAR(100),
@@ -246,4 +246,40 @@ tasks:
         )
         
         print(f"Successfully loaded {len(df)} rows to staging table")
+  
+  - id: alter_intermediation_tables_add_columns
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      ALTER TABLE {{render(vars.staging_table)}} 
+      ADD COLUMN IF NOT EXISTS unique_row_id VARCHAR(32),
+      ADD COLUMN IF NOT EXISTS filename VARCHAR(255);
+
+      ALTER TABLE {{render(vars.table)}} 
+      ADD COLUMN IF NOT EXISTS unique_row_id VARCHAR(32),
+      ADD COLUMN IF NOT EXISTS filename VARCHAR(255);
+  
+  - id: data_table_add_unique_id_and_filename
+    type: io.kestra.plugin.jdbc.postgresql.Queries
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      UPDATE {{render(vars.staging_table)}}
+      SET 
+        unique_row_id = md5(
+          COALESCE(cedula, '') ||
+          COALESCE(nombre_del_candidato, '') || 
+          COALESCE(telefono, '') || 
+          COALESCE(fecha_envio_hojas_de_vida_a_la_empresa::text, '') || 
+          COALESCE(codigo_proceso, '')
+        ),
+        filename = '{{render(vars.file)}}';
+  
+  - id: log_staging_complete
+    type: io.kestra.core.tasks.log.Log
+    message: "Data loaded to staging table successfully"
+ 
  

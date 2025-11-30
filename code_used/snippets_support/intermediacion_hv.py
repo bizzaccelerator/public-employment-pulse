@@ -289,7 +289,7 @@ print(df[f_poblaciones & f_colocados]['nombre_de_la_empresa'].unique())
 
 
 # ## EXPORTAR DOCUMENTO
-f_export = (df['mes_registro'] == months[prev_month]) | (df['fecha_envío_hojas_de_vida_a_la_empresa'].dt.month == float(prev_month))
+f_export = (df['mes_registro'] == months[prev_month]) | (df['fecha_envío_hojas_de_vida_a_la_empresa'].dt.month == float(prev_month)) | (df['mes_de_colocación_en_plataforma'] == months[prev_month])
 intermediation = df[f_export]
 # Exporting the data
 intermediation.to_parquet(f'intermediacion_{prev_year}_{prev_month}.parquet', compression='zstd')
