@@ -1,0 +1,60 @@
+id: intermediation-raw-data-pipeline
+namespace: public_employment_pulse
+
+inputs:
+  - id: data_processed
+    type: SELECT
+    description: Data of interest processed.
+    displayName: "Choose the data of interest."
+    defaults: intermediacion
+    values: [ registro_hv, orientacion, intermediacion, vacantes, empresas ]
+
+  - id: year_of_interest
+    type: SELECT
+    description: Year of data to process.
+    displayName: "Choose the year of interest."
+    defaults: "2025"
+    values: [ "2024", "2025" ]
+
+  - id: month_of_interest
+    type: INT
+    description: Month of data to process.
+    displayName: "Choose the month number of interest."
+    defaults: 1
+    
+variables:
+  staging_table: "public.{{inputs.data_processed}}_staging"
+  table: "public.{{inputs.data_processed}}"
+  file: "{{inputs.data_processed}}_{{ inputs.year_of_interest}}_{{inputs.month_of_interest}}"
+  month_name: "{% set month_names = {1: 'january', 2: 'february', 3: 'march', 4: 'april', 5: 'may', 6: 'june', 7: 'july', 8: 'august', 9: 'september', 10: 'october', 11: 'november', 12: 'december'} %}{{ month_names[inputs.month_of_interest] }}"
+  month_padded: "{{ '%02d' | format(inputs.month_of_interest) }}"
+
+tasks:
+  - id: download_intermediation_file
+    type: io.kestra.plugin.gcp.gcs.Download
+    from: gs://operations-raw-data_public-employment-pulse/Base de Intermediacion Laboral 2025.xlsx
+  
+  - id: reading_monthly_registries
+    type: io.kestra.plugin.scripts.python.Commands
+    docker:
+      image: python:3.11-slim
+    description: "identifying the people sent to interviews in {{ vars.month_name }}"
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    namespaceFiles:
+      enabled: true
+      include:
+        - "intermediacion_hv.py"
+    beforeCommands:
+      - pip install pandas numpy openpyxl pyarrow fastparquet
+    inputFiles:
+      intermediacion: '{{ outputs.download_intermediation_file.uri }}'
+    env:
+      MONTH: "{{ inputs.month_of_interest }}"
+      YEAR: "{{ inputs.year_of_interest }}"
+    commands:
+      - "python intermediacion_hv.py"
+    outputFiles:
+      - "*.parquet"
+      - "registries_count.txt"
+
