@@ -131,3 +131,119 @@ tasks:
       );
   
 
+  - id: load_data_to_staging
+    type: io.kestra.plugin.scripts.python.Script
+    docker:
+      image: python:3.11-slim
+    beforeCommands:
+      - pip install pandas sqlalchemy psycopg2-binary pyarrow fastparquet
+    inputFiles:
+      data_file: "{{ outputs.reading_monthly_registries.outputFiles['intermediacion_'~ inputs.year_of_interest ~'_'~ inputs.month_of_interest ~'.parquet'] }}"
+    env:
+      DB_HOST: "{{ kv('POSTGRES_HOST') }}"
+      DB_PORT: "{{ kv('POSTGRES_PORT') }}"
+      DB_NAME: "{{ kv('POSTGRES_DB') }}"
+      DB_USER: "{{ kv('POSTGRES_USER') }}"
+      DB_PASSWORD: "{{ kv('POSTGRES_PASSWORD') }}"
+    script: |
+        import pandas as pd
+        import numpy as np
+        from sqlalchemy import create_engine
+        import os
+        
+        # Connection
+        connection_string = f"postgresql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT', '5432')}/{os.getenv('DB_NAME')}"
+        engine = create_engine(connection_string)
+        
+        # Read parquet
+        df = pd.read_parquet('data_file')
+        
+        print(f"Original columns: {list(df.columns)}")
+        
+        # Clean column names - map from actual parquet columns to database columns
+        column_mapping = {
+            'item': 'item',
+            'mes_registro': 'mes_registro',
+            'convenio': 'convenio',
+            'gestión_vacante_': 'gestion_vacante',
+            'población': 'poblacion',
+            'no.': 'no',
+            'código_proceso': 'codigo_proceso',
+            'nombre_de_la_empresa': 'nombre_de_la_empresa',
+            'nombre_de_la_vacante': 'nombre_de_la_vacante',
+            'puestos_de_trabajo_en_plataforma': 'puestos_de_trabajo_en_plataforma',
+            'fecha_de_publicacion_de_la_vacante': 'fecha_de_publicacion_de_la_vacante',
+            'fecha_de_vencimiento_de_la_vacante': 'fecha_de_vencimiento_de_la_vacante',
+            'hojas_de_vida_remitidas': 'hojas_de_vida_remitidas',
+            'fecha_envío_hojas_de_vida_a_la_empresa': 'fecha_envio_hojas_de_vida_a_la_empresa',
+            'nombre_del_candidato': 'nombre_del_candidato',
+            'cedula': 'cedula',
+            'telefono': 'telefono',
+            'edad': 'edad',
+            'rango_de_edad': 'rango_de_edad',
+            'nivel_educativo': 'nivel_educativo',
+            'formacion': 'formacion',
+            'sexo': 'sexo',
+            'barrio': 'barrio',
+            'condicion': 'condicion',
+            'gestor': 'gestor',
+            'intermediador_': 'intermediador',
+            'llamada_/_convocatoria/_base_de_datos': 'llamada_convocatoria_base_de_datos',
+            'observación_intermediación': 'observacion_intermediacion',
+            'observación_gestión': 'observacion_gestion',
+            'observación_del_candidato': 'observacion_del_candidato',
+            'mes_de_colocación_en_plataforma': 'mes_de_colocacion_en_plataforma',
+            'colocado': 'colocado',
+            'semana_publicacion_vacante': 'semana_publicacion_vacante',
+            'mes_publicacion_vacante': 'mes_publicacion_vacante',
+            'tipo_de_vacante': 'tipo_de_vacante',
+            'año_publicacion_vacante': 'anio_publicacion_vacante',
+            'discapacidad': 'discapacidad',
+            'vca': 'vca',
+            'vvg': 'vvg',
+            'migrante': 'migrante',
+            'etnias': 'etnias',
+            'reincorporados': 'reincorporados'
+        }
+        
+        # Rename columns
+        df = df.rename(columns=column_mapping)
+        
+        # Convert date columns with proper format
+        date_columns = ['fecha_de_publicacion_de_la_vacante', 'fecha_de_vencimiento_de_la_vacante', 'fecha_envio_hojas_de_vida_a_la_empresa']
+        for col in date_columns:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], format='mixed', dayfirst=True, errors='coerce')
+        
+        # Handle numeric columns
+        numeric_columns = ['puestos_de_trabajo_en_plataforma', 'hojas_de_vida_remitidas', 'edad', 'semana_publicacion_vacante', 'anio_publicacion_vacante']
+        for col in numeric_columns:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # CRITICAL: Convert any remaining object/array columns to strings
+        for col in df.columns:
+            if df[col].dtype == 'object':
+                # Check if column contains arrays/lists
+                if df[col].apply(lambda x: isinstance(x, (list, np.ndarray))).any():
+                    df[col] = df[col].apply(lambda x: str(x) if isinstance(x, (list, np.ndarray)) else x)
+        
+        # Replace numpy NaN with None for proper NULL insertion
+        df = df.replace({np.nan: None})
+        
+        print(f"Loaded {len(df)} rows from parquet")
+        print(f"Mapped columns: {list(df.columns)}")
+        print(f"Data types: {df.dtypes.to_dict()}")
+        
+        # Load data into staging table
+        df.to_sql(
+            'intermediacion_staging',
+            engine,
+            if_exists='append',
+            index=False,
+            method='multi',
+            chunksize=100
+        )
+        
+        print(f"Successfully loaded {len(df)} rows to staging table")
+ 
