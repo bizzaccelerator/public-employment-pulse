@@ -57,4 +57,77 @@ tasks:
     outputFiles:
       - "*.parquet"
       - "registries_count.txt"
+  
+  - id: log_completion
+    type: io.kestra.core.tasks.log.Log
+    message: "Excel files processed successfully"
+  
+  - id: drop_tables_if_exists
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      DROP TABLE IF EXISTS {{render(vars.staging_table)}};
+      DROP TABLE IF EXISTS {{render(vars.table)}};
+  
+  - id: create_intermediation_tables
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      -- Create main table if not exists
+      CREATE TABLE IF NOT EXISTS {{render(vars.table)}} (
+          id SERIAL PRIMARY KEY,
+          item INTEGER,
+          mes_registro VARCHAR(100),
+          convenio VARCHAR(200),
+          gestion_vacante VARCHAR(200),
+          poblacion VARCHAR(100),
+          no VARCHAR(50),
+          codigo_proceso VARCHAR(200),
+          nombre_de_la_empresa VARCHAR(255),
+          nombre_de_la_vacante VARCHAR(255),
+          puestos_de_trabajo_en_plataforma INTEGER,
+          fecha_de_publicacion_de_la_vacante TIMESTAMP,
+          fecha_de_vencimiento_de_la_vacante TIMESTAMP,
+          hojas_de_vida_remitidas INTEGER,
+          fecha_envio_hojas_de_vida_a_la_empresa TIMESTAMP,
+          nombre_del_candidato VARCHAR(255),
+          cedula VARCHAR(50),
+          telefono VARCHAR(50),
+          edad INTEGER,
+          rango_de_edad VARCHAR(50),
+          nivel_educativo VARCHAR(100),
+          formacion VARCHAR(255),
+          sexo VARCHAR(20),
+          barrio VARCHAR(100),
+          condicion VARCHAR(100),
+          gestor VARCHAR(200),
+          intermediador VARCHAR(200),
+          llamada_convocatoria_base_de_datos VARCHAR(100),
+          observacion_intermediacion TEXT,
+          observacion_gestion TEXT,
+          observacion_del_candidato TEXT,
+          mes_de_colocacion_en_plataforma VARCHAR(50),
+          colocado BOOLEAN,
+          semana_publicacion_vacante INTEGER,
+          mes_publicacion_vacante VARCHAR(50),
+          tipo_de_vacante VARCHAR(100),
+          anio_publicacion_vacante INTEGER,
+          discapacidad VARCHAR(100),
+          vca VARCHAR(100),
+          vvg VARCHAR(100),
+          migrante VARCHAR(100),
+          etnias VARCHAR(100),
+          reincorporados VARCHAR(100),
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+      
+      -- Create staging table
+      CREATE TABLE IF NOT EXISTS {{render(vars.staging_table)}} (
+          LIKE {{render(vars.table)}} INCLUDING ALL
+      );
+  
 
