@@ -282,4 +282,45 @@ tasks:
     type: io.kestra.core.tasks.log.Log
     message: "Data loaded to staging table successfully"
  
- 
+  - id: identify_intermediation_incomplete_data
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      SELECT 
+        unique_row_id, 
+        cedula,
+        CASE 
+          WHEN edad IS NULL THEN 'edad'
+          WHEN sexo IS NULL THEN 'sexo'
+          WHEN edad IS NULL AND sexo IS NULL THEN 'edad y sexo'
+        END AS missing_field
+      FROM intermediacion_staging
+      WHERE edad IS NULL OR sexo IS NULL;
+    fetchType: STORE
+  
+  - id: convert_incomplete_to_csv
+    type: "io.kestra.plugin.serdes.csv.IonToCsv"
+    from: "{{ outputs.identify_intermediation_incomplete_data.uri }}"
+  
+  - id: send_email_with_attachment
+    type: io.kestra.plugin.notifications.mail.MailSend
+    from: "{{ kv('SENDER_EMAIL') }}"
+    to: "{{ kv('RECIPIENT_EMAILS') }}"
+    subject: "Incomplete Data Report - {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}"
+    htmlTextContent: |
+      <h2>Incomplete Intermediation Data Report</h2>
+      <p>Please find attached the incomplete data report for <strong>{{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}</strong>.</p>
+      <p><strong>Total records processed this month is:</strong> {{ read(outputs.reading_monthly_registries.outputFiles['registries_count.txt']) }}</p>
+      <p><strong>Total records with missing fields:</strong> {{ outputs.identify_intermediation_incomplete_data.size }}</p>
+      <p>Please review and take appropriate action.</p>
+    attachments:
+      - name: incomplete_data_{{ inputs.month_of_interest }}_{{ inputs.year_of_interest }}.csv
+        uri: "{{ outputs.convert_incomplete_to_csv.uri }}"
+        contentType: text/csv
+    host: "{{ kv('SMTP_SERVER') }}"
+    port: "{{ kv('SMTP_PORT') }}"
+    username: "{{ kv('GMAIL_USERNAME') }}"
+    password: "{{ kv('GMAIL_APP_PASSWORD') }}"
+    transportStrategy: SMTP_TLS
