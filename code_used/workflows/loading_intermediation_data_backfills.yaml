@@ -1,0 +1,385 @@
+id: intermediation-raw-data-pipeline_backfills
+namespace: public_employment_pulse
+
+inputs:
+  - id: data_processed
+    type: SELECT
+    description: Data of interest processed.
+    displayName: "Choose the data of interest."
+    defaults: intermediacion
+    values: [ registro_hv, orientacion, intermediacion, vacantes, empresas ]
+    
+variables:
+  staging_table: "public.{{inputs.data_processed}}_staging"
+  table: "public.{{inputs.data_processed}}"
+  file: "{{inputs.data_processed}}_{{ trigger.date | date('yyyy_M') }}"
+  month_name: "{{ trigger.date | date('MMMM') | lower }}"
+  month_padded: "{{ '%02d' | format( trigger.date | date('M') ) }}"
+
+tasks:
+  - id: download_intermediation_file
+    type: io.kestra.plugin.gcp.gcs.Download
+    from: gs://operations-raw-data_public-employment-pulse/Base de Intermediacion Laboral 2025.xlsx
+  
+  - id: reading_monthly_registries
+    type: io.kestra.plugin.scripts.python.Commands
+    docker:
+      image: python:3.11-slim
+    description: "identifying the people sent to interviews in {{ vars.month_name }}"
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    namespaceFiles:
+      enabled: true
+      include:
+        - "intermediacion_hv.py"
+    beforeCommands:
+      - pip install pandas numpy openpyxl pyarrow fastparquet
+    inputFiles:
+      intermediacion: '{{ outputs.download_intermediation_file.uri }}'
+    env:
+      MONTH: "{{ trigger.date | date('M') }}"
+      YEAR: "{{ trigger.date | date('yyyy') }}"
+    commands:
+      - "python intermediacion_hv.py"
+    outputFiles:
+      - "*.parquet"
+      - "registries_count.txt"
+  
+  - id: log_completion
+    type: io.kestra.core.tasks.log.Log
+    message: "Excel files processed successfully"
+  
+  - id: drop_tables_if_exists
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      DROP TABLE IF EXISTS {{render(vars.staging_table)}};
+      DROP TABLE IF EXISTS {{render(vars.table)}};
+  
+  - id: create_intermediation_tables
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      -- Create main table if not exists
+      CREATE TABLE IF NOT EXISTS {{render(vars.table)}} (
+          id SERIAL PRIMARY KEY,
+          item INTEGER,
+          mes_registro VARCHAR(100),
+          convenio VARCHAR(200),
+          gestion_vacante VARCHAR(200),
+          poblacion VARCHAR(100),
+          no VARCHAR(50),
+          codigo_proceso VARCHAR(200),
+          nombre_de_la_empresa VARCHAR(255),
+          nombre_de_la_vacante VARCHAR(255),
+          puestos_de_trabajo_en_plataforma INTEGER,
+          fecha_de_publicacion_de_la_vacante TIMESTAMP,
+          fecha_de_vencimiento_de_la_vacante TIMESTAMP,
+          hojas_de_vida_remitidas INTEGER,
+          fecha_envio_hojas_de_vida_a_la_empresa TIMESTAMP,
+          nombre_del_candidato VARCHAR(255),
+          cedula VARCHAR(50),
+          telefono VARCHAR(50),
+          edad INTEGER,
+          rango_de_edad VARCHAR(50),
+          nivel_educativo VARCHAR(100),
+          formacion VARCHAR(255),
+          sexo VARCHAR(20),
+          barrio VARCHAR(100),
+          condicion VARCHAR(100),
+          gestor VARCHAR(200),
+          intermediador VARCHAR(200),
+          llamada_convocatoria_base_de_datos VARCHAR(100),
+          observacion_intermediacion TEXT,
+          observacion_gestion TEXT,
+          observacion_del_candidato TEXT,
+          mes_de_colocacion_en_plataforma VARCHAR(50),
+          colocado INTEGER,
+          semana_publicacion_vacante INTEGER,
+          mes_publicacion_vacante VARCHAR(50),
+          tipo_de_vacante VARCHAR(100),
+          anio_publicacion_vacante INTEGER,
+          discapacidad VARCHAR(100),
+          vca VARCHAR(100),
+          vvg VARCHAR(100),
+          migrante VARCHAR(100),
+          etnias VARCHAR(100),
+          reincorporados VARCHAR(100),
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+      
+      -- Create staging table
+      CREATE TABLE IF NOT EXISTS {{render(vars.staging_table)}} (
+          LIKE {{render(vars.table)}} INCLUDING ALL
+      );
+  
+
+  - id: load_data_to_staging
+    type: io.kestra.plugin.scripts.python.Script
+    docker:
+      image: python:3.11-slim
+    beforeCommands:
+      - pip install pandas sqlalchemy psycopg2-binary pyarrow fastparquet
+    inputFiles:
+      data_file: "{{ outputs.reading_monthly_registries.outputFiles['intermediacion_'+ trigger.date | date('yyyy_M') +'.parquet'] }}"
+    env:
+      DB_HOST: "{{ kv('POSTGRES_HOST') }}"
+      DB_PORT: "{{ kv('POSTGRES_PORT') }}"
+      DB_NAME: "{{ kv('POSTGRES_DB') }}"
+      DB_USER: "{{ kv('POSTGRES_USER') }}"
+      DB_PASSWORD: "{{ kv('POSTGRES_PASSWORD') }}"
+    script: |
+        import pandas as pd
+        import numpy as np
+        from sqlalchemy import create_engine
+        import os
+        
+        # Connection
+        connection_string = f"postgresql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT', '5432')}/{os.getenv('DB_NAME')}"
+        engine = create_engine(connection_string)
+        
+        # Read parquet
+        df = pd.read_parquet('data_file')
+        
+        print(f"Original columns: {list(df.columns)}")
+        
+        # Clean column names - map from actual parquet columns to database columns
+        column_mapping = {
+            'item': 'item',
+            'mes_registro': 'mes_registro',
+            'convenio': 'convenio',
+            'gestión_vacante_': 'gestion_vacante',
+            'población': 'poblacion',
+            'no.': 'no',
+            'código_proceso': 'codigo_proceso',
+            'nombre_de_la_empresa': 'nombre_de_la_empresa',
+            'nombre_de_la_vacante': 'nombre_de_la_vacante',
+            'puestos_de_trabajo_en_plataforma': 'puestos_de_trabajo_en_plataforma',
+            'fecha_de_publicacion_de_la_vacante': 'fecha_de_publicacion_de_la_vacante',
+            'fecha_de_vencimiento_de_la_vacante': 'fecha_de_vencimiento_de_la_vacante',
+            'hojas_de_vida_remitidas': 'hojas_de_vida_remitidas',
+            'fecha_envío_hojas_de_vida_a_la_empresa': 'fecha_envio_hojas_de_vida_a_la_empresa',
+            'nombre_del_candidato': 'nombre_del_candidato',
+            'cedula': 'cedula',
+            'telefono': 'telefono',
+            'edad': 'edad',
+            'rango_de_edad': 'rango_de_edad',
+            'nivel_educativo': 'nivel_educativo',
+            'formacion': 'formacion',
+            'sexo': 'sexo',
+            'barrio': 'barrio',
+            'condicion': 'condicion',
+            'gestor': 'gestor',
+            'intermediador_': 'intermediador',
+            'llamada_/_convocatoria/_base_de_datos': 'llamada_convocatoria_base_de_datos',
+            'observación_intermediación': 'observacion_intermediacion',
+            'observación_gestión': 'observacion_gestion',
+            'observación_del_candidato': 'observacion_del_candidato',
+            'mes_de_colocación_en_plataforma': 'mes_de_colocacion_en_plataforma',
+            'colocado': 'colocado',
+            'semana_publicacion_vacante': 'semana_publicacion_vacante',
+            'mes_publicacion_vacante': 'mes_publicacion_vacante',
+            'tipo_de_vacante': 'tipo_de_vacante',
+            'año_publicacion_vacante': 'anio_publicacion_vacante',
+            'discapacidad': 'discapacidad',
+            'vca': 'vca',
+            'vvg': 'vvg',
+            'migrante': 'migrante',
+            'etnias': 'etnias',
+            'reincorporados': 'reincorporados'
+        }
+        
+        # Rename columns
+        df = df.rename(columns=column_mapping)
+        
+        # Convert date columns with proper format
+        date_columns = ['fecha_de_publicacion_de_la_vacante', 'fecha_de_vencimiento_de_la_vacante', 'fecha_envio_hojas_de_vida_a_la_empresa']
+        for col in date_columns:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], format='mixed', dayfirst=True, errors='coerce')
+        
+        # Handle numeric columns
+        numeric_columns = ['puestos_de_trabajo_en_plataforma', 'hojas_de_vida_remitidas', 'edad', 'semana_publicacion_vacante', 'anio_publicacion_vacante']
+        for col in numeric_columns:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # CRITICAL: Convert any remaining object/array columns to strings
+        for col in df.columns:
+            if df[col].dtype == 'object':
+                # Check if column contains arrays/lists
+                if df[col].apply(lambda x: isinstance(x, (list, np.ndarray))).any():
+                    df[col] = df[col].apply(lambda x: str(x) if isinstance(x, (list, np.ndarray)) else x)
+        
+        # Replace numpy NaN with None for proper NULL insertion
+        df = df.replace({np.nan: None})
+        
+        print(f"Loaded {len(df)} rows from parquet")
+        print(f"Mapped columns: {list(df.columns)}")
+        print(f"Data types: {df.dtypes.to_dict()}")
+        
+        # Load data into staging table
+        df.to_sql(
+            'intermediacion_staging',
+            engine,
+            if_exists='append',
+            index=False,
+            method='multi',
+            chunksize=100
+        )
+        
+        print(f"Successfully loaded {len(df)} rows to staging table")
+  
+  - id: alter_intermediation_tables_add_columns
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      ALTER TABLE {{render(vars.staging_table)}} 
+      ADD COLUMN IF NOT EXISTS unique_row_id VARCHAR(32),
+      ADD COLUMN IF NOT EXISTS filename VARCHAR(255);
+
+      ALTER TABLE {{render(vars.table)}} 
+      ADD COLUMN IF NOT EXISTS unique_row_id VARCHAR(32),
+      ADD COLUMN IF NOT EXISTS filename VARCHAR(255);
+  
+  - id: data_table_add_unique_id_and_filename
+    type: io.kestra.plugin.jdbc.postgresql.Queries
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      UPDATE {{render(vars.staging_table)}}
+      SET 
+        unique_row_id = md5(
+          COALESCE(cedula, '') ||
+          COALESCE(nombre_del_candidato, '') || 
+          COALESCE(telefono, '') || 
+          COALESCE(fecha_envio_hojas_de_vida_a_la_empresa::text, '') || 
+          COALESCE(codigo_proceso, '')
+        ),
+        filename = '{{render(vars.file)}}';
+  
+  - id: log_staging_complete
+    type: io.kestra.core.tasks.log.Log
+    message: "Data loaded to staging table successfully"
+ 
+  - id: identify_intermediation_incomplete_data
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      SELECT 
+        unique_row_id, 
+        cedula,
+        CASE 
+          WHEN edad IS NULL THEN 'edad'
+          WHEN sexo IS NULL THEN 'sexo'
+          WHEN edad IS NULL AND sexo IS NULL THEN 'edad y sexo'
+        END AS missing_field
+      FROM intermediacion_staging
+      WHERE edad IS NULL OR sexo IS NULL;
+    fetchType: STORE
+  
+  - id: convert_incomplete_to_csv
+    type: "io.kestra.plugin.serdes.csv.IonToCsv"
+    from: "{{ outputs.identify_intermediation_incomplete_data.uri }}"
+  
+  - id: send_email_with_attachment
+    type: io.kestra.plugin.notifications.mail.MailSend
+    from: "{{ kv('SENDER_EMAIL') }}"
+    to: "{{ kv('RECIPIENT_EMAILS') }}"
+    subject: "Incomplete Data Report - {{ trigger.date | date('yyyy_M') }}"
+    htmlTextContent: |
+      <h2>Incomplete Intermediation Data Report</h2>
+      <p>Please find attached the incomplete data report for <strong>{{ trigger.date | date('yyyy_M') }}</strong>.</p>
+      <p><strong>Total records processed this month is:</strong> {{ read(outputs.reading_monthly_registries.outputFiles['registries_count.txt']) }}</p>
+      <p><strong>Total records with missing fields:</strong> {{ outputs.identify_intermediation_incomplete_data.size }}</p>
+      <p>Please review and take appropriate action.</p>
+    attachments:
+      - name: incomplete_data_{{ trigger.date | date('yyyy_M') }}.csv
+        uri: "{{ outputs.convert_incomplete_to_csv.uri }}"
+        contentType: text/csv
+    host: "{{ kv('SMTP_SERVER') }}"
+    port: "{{ kv('SMTP_PORT') }}"
+    username: "{{ kv('GMAIL_USERNAME') }}"
+    password: "{{ kv('GMAIL_APP_PASSWORD') }}"
+    transportStrategy: SMTP_TLS
+  
+  - id: query_monthly_data_to_upload
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      SELECT
+        COALESCE(unique_row_id, '') as unique_row_id,
+        COALESCE(filename, '') as filename,
+        COALESCE(item, '0') as item,
+        COALESCE(mes_registro, '0') as mes_registro,
+        COALESCE(convenio, '') as convenio,
+        COALESCE(gestion_vacante, '') as gestion_vacante,
+        COALESCE(poblacion, '') as poblacion,
+        COALESCE(no, '') as no,
+        COALESCE(codigo_proceso, '') as codigo_proceso,
+        COALESCE(nombre_de_la_empresa, '') as nombre_de_la_empresa,
+        COALESCE(nombre_de_la_vacante, '') as nombre_de_la_vacante,
+        COALESCE(puestos_de_trabajo_en_plataforma, '0') as puestos_de_trabajo_en_plataforma,
+        COALESCE(fecha_de_publicacion_de_la_vacante, '1970-01-01') as fecha_de_publicacion_de_la_vacante,
+        COALESCE(fecha_de_vencimiento_de_la_vacante, '1970-01-01') as fecha_de_vencimiento_de_la_vacante,
+        COALESCE(hojas_de_vida_remitidas, '0') as hojas_de_vida_remitidas,
+        COALESCE(fecha_envio_hojas_de_vida_a_la_empresa, '1970-01-01') as fecha_envio_hojas_de_vida_a_la_empresa,
+        COALESCE(nombre_del_candidato, '') as nombre_del_candidato,
+        COALESCE(cedula::text, '0') as cedula,
+        COALESCE(telefono, '0') as telefono,
+        COALESCE(edad, '0') as edad,
+        COALESCE(rango_de_edad, '') as rango_de_edad,
+        COALESCE(nivel_educativo, '') as nivel_educativo,
+        COALESCE(formacion, '') as formacion,
+        COALESCE(sexo, '') as sexo,
+        COALESCE(barrio, '') as barrio,
+        COALESCE(condicion, '') as condicion,
+        COALESCE(gestor,'') as gestor,
+        COALESCE(intermediador, '') as intermediador,
+        COALESCE(llamada_convocatoria_base_de_datos, '') as llamada_convocatoria_base_de_datos,
+        COALESCE(observacion_intermediacion, '') as observacion_intermediacion,
+        COALESCE(observacion_gestion, '') as observacion_gestion,
+        COALESCE(observacion_del_candidato, '') as observacion_del_candidato,
+        COALESCE(mes_de_colocacion_en_plataforma, '') as mes_de_colocacion_en_plataforma,
+        COALESCE(colocado, '0') as colocado,
+        COALESCE(semana_publicacion_vacante, '0') as semana_publicacion_vacante,
+        COALESCE(mes_publicacion_vacante, '') as mes_publicacion_vacante,
+        COALESCE(tipo_de_vacante, '') as tipo_de_vacante,
+        COALESCE(anio_publicacion_vacante, '0') as anio_publicacion_vacante,
+        COALESCE(discapacidad, '') as discapacidad,
+        COALESCE(vca,'') as vca,
+        COALESCE(vvg, '') as vvg,
+        COALESCE(migrante, '') as migrante,
+        COALESCE(etnias, '') as etnias,
+        COALESCE(reincorporados, '') as reincorporados
+      FROM {{render(vars.staging_table)}}
+      WHERE EXTRACT(MONTH FROM fecha_envio_hojas_de_vida_a_la_empresa) = {{ trigger.date | date('M') }}
+        AND EXTRACT(YEAR FROM fecha_envio_hojas_de_vida_a_la_empresa) = {{ trigger.date | date('yyyy') }};
+    store: true
+  
+  - id: convert_monthly_data_to_parquet
+    type: io.kestra.plugin.serdes.parquet.IonToParquet
+    from: "{{ outputs.query_monthly_data_to_upload.uri }}"
+  
+  - id: upload_monthly_data_to_gcs
+    type: io.kestra.plugin.gcp.gcs.Upload
+    from: "{{ outputs.convert_monthly_data_to_parquet.uri }}"
+    to: "gs://employment-agency-operational-data/{{ inputs.data_processed }}/{{ trigger.date | date('yyyy') }}/{{ vars.month_name }}/intermediacion_hv_{{ trigger.date | date('yyyy') }}_{{ trigger.date | date('M') }}.parquet"
+
+triggers:
+  - id: intermediation_monthly_trigger
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 20 7 * *"
+    inputs:
+      data_processed: intermediacion_hv
