@@ -324,3 +324,68 @@ tasks:
     username: "{{ kv('GMAIL_USERNAME') }}"
     password: "{{ kv('GMAIL_APP_PASSWORD') }}"
     transportStrategy: SMTP_TLS
+  
+  - id: query_monthly_data_to_upload
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      SELECT
+        COALESCE(unique_row_id, '') as unique_row_id,
+        COALESCE(filename, '') as filename,
+        COALESCE(item, '0') as item,
+        COALESCE(mes_registro, '0') as mes_registro,
+        COALESCE(convenio, '') as convenio,
+        COALESCE(gestion_vacante, '') as gestion_vacante,
+        COALESCE(poblacion, '') as poblacion,
+        COALESCE(no, '') as no,
+        COALESCE(codigo_proceso, '') as codigo_proceso,
+        COALESCE(nombre_de_la_empresa, '') as nombre_de_la_empresa,
+        COALESCE(nombre_de_la_vacante, '') as nombre_de_la_vacante,
+        COALESCE(puestos_de_trabajo_en_plataforma, '0') as puestos_de_trabajo_en_plataforma,
+        COALESCE(fecha_de_publicacion_de_la_vacante, '1970-01-01') as fecha_de_publicacion_de_la_vacante,
+        COALESCE(fecha_de_vencimiento_de_la_vacante, '1970-01-01') as fecha_de_vencimiento_de_la_vacante,
+        COALESCE(hojas_de_vida_remitidas, '0') as hojas_de_vida_remitidas,
+        COALESCE(fecha_envio_hojas_de_vida_a_la_empresa, '1970-01-01') as fecha_envio_hojas_de_vida_a_la_empresa,
+        COALESCE(nombre_del_candidato, '') as nombre_del_candidato,
+        COALESCE(cedula::text, '0') as cedula,
+        COALESCE(telefono, '0') as telefono,
+        COALESCE(edad, '0') as edad,
+        COALESCE(rango_de_edad, '') as rango_de_edad,
+        COALESCE(nivel_educativo, '') as nivel_educativo,
+        COALESCE(formacion, '') as formacion,
+        COALESCE(sexo, '') as sexo,
+        COALESCE(barrio, '') as barrio,
+        COALESCE(condicion, '') as condicion,
+        COALESCE(gestor,'') as gestor,
+        COALESCE(intermediador, '') as intermediador,
+        COALESCE(llamada_convocatoria_base_de_datos, '') as llamada_convocatoria_base_de_datos,
+        COALESCE(observacion_intermediacion, '') as observacion_intermediacion,
+        COALESCE(observacion_gestion, '') as observacion_gestion,
+        COALESCE(observacion_del_candidato, '') as observacion_del_candidato,
+        COALESCE(mes_de_colocacion_en_plataforma, '') as mes_de_colocacion_en_plataforma,
+        COALESCE(colocado, '0') as colocado,
+        COALESCE(semana_publicacion_vacante, '0') as semana_publicacion_vacante,
+        COALESCE(mes_publicacion_vacante, '') as mes_publicacion_vacante,
+        COALESCE(tipo_de_vacante, '') as tipo_de_vacante,
+        COALESCE(anio_publicacion_vacante, '0') as anio_publicacion_vacante,
+        COALESCE(discapacidad, '') as discapacidad,
+        COALESCE(vca,'') as vca,
+        COALESCE(vvg, '') as vvg,
+        COALESCE(migrante, '') as migrante,
+        COALESCE(etnias, '') as etnias,
+        COALESCE(reincorporados, '') as reincorporados
+      FROM {{render(vars.staging_table)}}
+      WHERE EXTRACT(MONTH FROM fecha_envio_hojas_de_vida_a_la_empresa) = {{ inputs.month_of_interest }}
+        AND EXTRACT(YEAR FROM fecha_envio_hojas_de_vida_a_la_empresa) = {{ inputs.year_of_interest }};
+    store: true
+  
+  - id: convert_monthly_data_to_parquet
+    type: io.kestra.plugin.serdes.parquet.IonToParquet
+    from: "{{ outputs.query_monthly_data_to_upload.uri }}"
+  
+  - id: upload_monthly_data_to_gcs
+    type: io.kestra.plugin.gcp.gcs.Upload
+    from: "{{ outputs.convert_monthly_data_to_parquet.uri }}"
+    to: "gs://employment-agency-operational-data/{{ inputs.data_processed }}/{{ inputs.year_of_interest }}/{{ vars.month_name }}/intermediacion_hv_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}.parquet"
