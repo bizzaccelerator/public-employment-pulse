@@ -215,4 +215,132 @@ tasks:
         )
         
         print(f"Successfully loaded {len(df)} rows to staging table")
- 
+
+  - id: alter_companies_tables_add_columns
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      ALTER TABLE {{render(vars.staging_table)}} 
+      ADD COLUMN IF NOT EXISTS unique_row_id VARCHAR(32),
+      ADD COLUMN IF NOT EXISTS filename VARCHAR(255);
+
+      ALTER TABLE {{render(vars.table)}} 
+      ADD COLUMN IF NOT EXISTS unique_row_id VARCHAR(32),
+      ADD COLUMN IF NOT EXISTS filename VARCHAR(255);
+
+  - id: data_table_add_unique_id_and_filename
+    type: io.kestra.plugin.jdbc.postgresql.Queries
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      UPDATE {{render(vars.staging_table)}}
+      SET 
+        unique_row_id = md5(
+          COALESCE(numero_documento::text, '') ||
+          COALESCE(razon_social, '') || 
+          COALESCE(telefono, '') || 
+          COALESCE(fecha_registro::text, '') || 
+          COALESCE(nombre_administrador, '')
+        ),
+        filename = '{{render(vars.file)}}';
+  
+  - id: log_staging_complete
+    type: io.kestra.core.tasks.log.Log
+    message: "Data loaded to staging table successfully"
+  
+  - id: identify_companies_incomplete_data
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      SELECT 
+        unique_row_id, 
+        numero_documento,
+        CASE 
+          WHEN actividad_economica IS NULL THEN 'actividad_economica'
+          WHEN direccion IS NULL THEN 'direccion'
+          WHEN actividad_economica IS NULL AND direccion IS NULL THEN 'actividad_economica y direccion'
+        END AS missing_field
+      FROM empresas_staging
+      WHERE actividad_economica IS NULL OR direccion IS NULL;
+    fetchType: STORE
+  
+  - id: convert_incomplete_to_csv
+    type: "io.kestra.plugin.serdes.csv.IonToCsv"
+    from: "{{ outputs.identify_companies_incomplete_data.uri }}"
+
+  - id: send_email_with_attachment
+    type: io.kestra.plugin.notifications.mail.MailSend
+    from: "{{ kv('SENDER_EMAIL') }}"
+    to: "{{ kv('RECIPIENT_EMAILS') }}"
+    subject: "Incomplete Data Report - {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}"
+    htmlTextContent: |
+      <h2>Incomplete Companies Data Report</h2>
+      <p>Please find attached the incomplete data report for <strong>{{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}</strong>.</p>
+      <p><strong>Total records processed this month is:</strong> {{ read(outputs.reading_monthly_registries.outputFiles['record_count.txt']) }}</p>
+      <p><strong>Total records with missing fields:</strong> {{ outputs.identify_companies_incomplete_data.size }}</p>
+      <p>Please review and take appropriate action.</p>
+    attachments:
+      - name: incomplete_data_{{ inputs.month_of_interest }}_{{ inputs.year_of_interest }}.csv
+        uri: "{{ outputs.convert_incomplete_to_csv.uri }}"
+        contentType: text/csv
+    host: "{{ kv('SMTP_SERVER') }}"
+    port: "{{ kv('SMTP_PORT') }}"
+    username: "{{ kv('GMAIL_USERNAME') }}"
+    password: "{{ kv('GMAIL_APP_PASSWORD') }}"
+    transportStrategy: SMTP_TLS
+  
+  - id: query_monthly_data_to_upload
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      SELECT
+        COALESCE(unique_row_id::TEXT, '') AS unique_row_id,
+        COALESCE(id::TEXT, '') AS id,
+        COALESCE(tipo_documento, '') AS tipo_documento,
+        COALESCE(numero_documento::TEXT, '0') AS numero_documento,
+        COALESCE(razon_social, '') AS razon_social,
+        COALESCE(naturaleza, '') AS naturaleza,
+        COALESCE(tipo_empresa, '') AS tipo_empresa,
+        COALESCE(actividad_economica, '') AS actividad_economica,
+        COALESCE(sector, '') AS sector,
+        COALESCE(tamanio, '') AS tamanio,
+        COALESCE(codigo_sede::TEXT, '0') AS codigo_sede,
+        COALESCE(nombre_sede, '') AS nombre_sede, 
+        COALESCE(telefono::TEXT, '0') AS telefono,
+        COALESCE(direccion, '') AS direccion,
+        COALESCE(tipo_sede, '') AS tipo_sede,
+        COALESCE(ciudad, '') AS ciudad,
+        COALESCE(departamento, '') AS departamento,
+        COALESCE(nombre_administrador, '') AS nombre_administrador,
+        COALESCE(email_administrador, '') AS email_administrador,
+        COALESCE(fecha_registro::TEXT, '1970-01-01') AS fecha_registro,
+        COALESCE(canal_de_registro, '') AS canal_de_registro,
+        COALESCE(prestador_aprobo, '') AS prestador_aprobo,
+        COALESCE(agencia_aprobo, '') AS agencia_aprobo,
+        COALESCE(agente_aprobo, '') AS agente_aprobo,
+        COALESCE(pais, '') AS pais,
+        COALESCE(telefono_clean::TEXT, '0') AS telefono_clean,
+        COALESCE(mes::TEXT, '0') AS mes,
+        COALESCE(anio::TEXT, '0') AS anio,
+        COALESCE(created_at::TEXT, '') AS created_at,
+        COALESCE(filename, '') AS filename
+      FROM {{render(vars.staging_table)}}
+      WHERE EXTRACT(MONTH FROM fecha_registro) = {{ inputs.month_of_interest }}
+        AND EXTRACT(YEAR FROM fecha_registro) = {{ inputs.year_of_interest }};
+    store: true
+  
+  - id: convert_monthly_data_to_parquet
+    type: io.kestra.plugin.serdes.parquet.IonToParquet
+    from: "{{ outputs.query_monthly_data_to_upload.uri }}"
+  
+  - id: upload_monthly_data_to_gcs
+    type: io.kestra.plugin.gcp.gcs.Upload
+    from: "{{ outputs.convert_monthly_data_to_parquet.uri }}"
+    to: "gs://employment-agency-operational-data/{{ inputs.data_processed }}/{{ inputs.year_of_interest }}/{{ vars.month_name }}/empresas_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}.parquet"
