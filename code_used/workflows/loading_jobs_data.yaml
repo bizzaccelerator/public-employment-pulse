@@ -1,0 +1,318 @@
+id: jobs-raw-data-pipeline
+namespace: public_employment_pulse
+
+inputs:
+  - id: data_processed
+    type: SELECT
+    description: Data of interest processed.
+    displayName: "Choose the data of interest."
+    defaults: vacantes
+    values: [ registro_hv, orientacion, intermediacion, vacantes, empresas ]
+
+  - id: year_of_interest
+    type: SELECT
+    description: Year of data to process.
+    displayName: "Choose the year of interest."
+    defaults: "2025"
+    values: [ "2024", "2025" ]
+
+  - id: month_of_interest
+    type: INT
+    description: Month of data to process.
+    displayName: "Choose the month number of interest."
+    defaults: 1
+    
+variables:
+  staging_table: "public.{{inputs.data_processed}}_staging"
+  table: "public.{{inputs.data_processed}}"
+  file: "{{inputs.data_processed}}_{{ inputs.year_of_interest}}_{{inputs.month_of_interest}}"
+  month_name: "{% set month_names = {1: 'january', 2: 'february', 3: 'march', 4: 'april', 5: 'may', 6: 'june', 7: 'july', 8: 'august', 9: 'september', 10: 'october', 11: 'november', 12: 'december'} %}{{ month_names[inputs.month_of_interest] }}"
+  month_padded: "{{ '%02d' | format(inputs.month_of_interest) }}"
+
+tasks:
+  - id: download_registries_file
+    type: io.kestra.plugin.gcp.gcs.Download
+    from: gs://operations-raw-data_public-employment-pulse/Vacantes_publicadas_2024-2025.xlsx
+
+  - id: reading_monthly_registries
+    type: io.kestra.plugin.scripts.python.Commands
+    docker:
+      image: python:3.11-slim
+    description: "identifying the new companies registered in {{ vars.month_name }}"
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    namespaceFiles:
+      enabled: true
+      include:
+        - "vacantes.py"
+    beforeCommands:
+      - pip install pandas numpy datetime openpyxl pyarrow fastparquet
+    inputFiles:
+      job_posting: '{{ outputs.download_registries_file.uri }}'
+    env:
+      MONTH: "{{ inputs.month_of_interest }}"
+      YEAR: "{{ inputs.year_of_interest }}"
+    commands:
+      - "python vacantes.py"
+    outputFiles:
+      - "*.parquet"
+      - "record_count.txt"
+  
+  - id: log_completion
+    type: io.kestra.core.tasks.log.Log
+    message: "Excel files processed successfully"
+  
+  - id: drop_tables_if_exists
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      DROP TABLE IF EXISTS {{render(vars.staging_table)}};
+      DROP TABLE IF EXISTS {{render(vars.table)}};
+  
+  - id: create_jobs_tables
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      -- Create main table if not exists
+      CREATE TABLE IF NOT EXISTS {{render(vars.table)}} (
+          codigo_proceso VARCHAR(255) PRIMARY KEY, 
+          nombre_vacante VARCHAR(255), 
+          cargo VARCHAR(255), 
+          n_postulados INTEGER, 
+          empresa VARCHAR(255),
+          tipodocumentoempresa VARCHAR(50), 
+          numerodocumentoempresa BIGINT, 
+          fecha_registro TIMESTAMP,
+          fecha_vencimiento TIMESTAMP, 
+          estado_actual VARCHAR(100), 
+          tipo_de_vacante VARCHAR(100),
+          puestos_de_trabajo INTEGER, 
+          tipo_de_contrato VARCHAR(100), 
+          agente_aprobo VARCHAR(255),
+          punto_atencion VARCHAR(255), 
+          pais VARCHAR(100),
+          mes INTEGER, 
+          anio INTEGER,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+      
+      -- Create staging table
+      CREATE TABLE IF NOT EXISTS {{render(vars.staging_table)}} (
+          LIKE {{render(vars.table)}} INCLUDING ALL
+      );
+  
+  - id: load_data_to_staging
+    type: io.kestra.plugin.scripts.python.Script
+    docker:
+      image: python:3.11-slim
+    beforeCommands:
+      - pip install pandas sqlalchemy psycopg2-binary pyarrow fastparquet
+    inputFiles:
+      data_file: "{{ outputs.reading_monthly_registries.outputFiles['vacantes_'~ inputs.year_of_interest ~'_'~ inputs.month_of_interest ~'.parquet'] }}"
+    env:
+      DB_HOST: "{{ kv('POSTGRES_HOST') }}"
+      DB_PORT: "{{ kv('POSTGRES_PORT') }}"
+      DB_NAME: "{{ kv('POSTGRES_DB') }}"
+      DB_USER: "{{ kv('POSTGRES_USER') }}"
+      DB_PASSWORD: "{{ kv('POSTGRES_PASSWORD') }}"
+    script: |
+        import pandas as pd
+        import numpy as np
+        from sqlalchemy import create_engine
+        import os
+        
+        # Connection
+        connection_string = f"postgresql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT', '5432')}/{os.getenv('DB_NAME')}"
+        engine = create_engine(connection_string)
+        
+        # Read parquet
+        df = pd.read_parquet('data_file')
+        
+        print(f"Original columns: {list(df.columns)}")
+        
+        # Clean column names - map from actual parquet columns to database columns
+        column_mapping = {
+            'código_proceso': 'codigo_proceso', 
+            'nombre_vacante': 'nombre_vacante', 
+            'cargo': 'cargo', 
+            '#_postulados': 'n_postulados', 
+            'empresa': 'empresa',
+            'tipodocumentoempresa': 'tipodocumentoempresa', 
+            'numerodocumentoempresa': 'numerodocumentoempresa', 
+            'fecha_registro': 'fecha_registro',
+            'fecha_vencimiento': 'fecha_vencimiento', 
+            'estado_actual': 'estado_actual', 
+            'tipo_de_vacante': 'tipo_de_vacante',
+            'puestos_de_trabajo': 'puestos_de_trabajo', 
+            'tipo_de_contrato': 'tipo_de_contrato', 
+            'agente_aprobó': 'agente_aprobo',
+            'punto_atención': 'punto_atencion', 
+            'país': 'pais',
+            'mes': 'mes', 
+            'año': 'anio',
+            'created_at': 'created_at'
+        }
+        
+        # Rename columns
+        df = df.rename(columns=column_mapping)
+        
+        # Convert date columns with proper format
+        date_columns = ['fecha_registro','fecha_vencimiento', 'created_at']
+        for col in date_columns:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], format='mixed', dayfirst=True, errors='coerce')
+        
+        # Handle numeric columns
+        numeric_columns = ['n_postulados', 'numerodocumentoempresa', 'puestos_de_trabajo', 'mes', 'anio']
+        for col in numeric_columns:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # CRITICAL: Convert any remaining object/array columns to strings
+        for col in df.columns:
+            if df[col].dtype == 'object':
+                # Check if column contains arrays/lists
+                if df[col].apply(lambda x: isinstance(x, (list, np.ndarray))).any():
+                    df[col] = df[col].apply(lambda x: str(x) if isinstance(x, (list, np.ndarray)) else x)
+        
+        # Replace numpy NaN with None for proper NULL insertion
+        df = df.replace({np.nan: None})
+        
+        print(f"Loaded {len(df)} rows from parquet")
+        print(f"Mapped columns: {list(df.columns)}")
+        print(f"Data types: {df.dtypes.to_dict()}")
+        
+        # Load data into staging table
+        df.to_sql(
+            'vacantes_staging',
+            engine,
+            if_exists='append',
+            index=False,
+            method='multi',
+            chunksize=100
+        )
+        
+        print(f"Successfully loaded {len(df)} rows to staging table")
+
+  - id: alter_companies_tables_add_columns
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      ALTER TABLE {{render(vars.staging_table)}} 
+      ADD COLUMN IF NOT EXISTS unique_row_id VARCHAR(32),
+      ADD COLUMN IF NOT EXISTS filename VARCHAR(255);
+
+      ALTER TABLE {{render(vars.table)}} 
+      ADD COLUMN IF NOT EXISTS unique_row_id VARCHAR(32),
+      ADD COLUMN IF NOT EXISTS filename VARCHAR(255);
+
+  - id: data_table_add_unique_id_and_filename
+    type: io.kestra.plugin.jdbc.postgresql.Queries
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      UPDATE {{render(vars.staging_table)}}
+      SET 
+        unique_row_id = md5(
+          COALESCE(numerodocumentoempresa::text, '') ||
+          COALESCE(empresa, '') || 
+          COALESCE(tipo_de_contrato, '') || 
+          COALESCE(fecha_registro::text, '') || 
+          COALESCE(cargo, '')
+        ),
+        filename = '{{render(vars.file)}}';
+  
+  - id: log_staging_complete
+    type: io.kestra.core.tasks.log.Log
+    message: "Data loaded to staging table successfully"
+  
+  - id: identify_jobs_incomplete_data
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      SELECT 
+        unique_row_id, 
+        numerodocumentoempresa,
+        CASE 
+          WHEN agente_aprobo IS NULL THEN 'agente_aprobo'
+          WHEN puestos_de_trabajo IS NULL THEN 'puestos_de_trabajo'
+          WHEN agente_aprobo IS NULL AND puestos_de_trabajo IS NULL THEN 'agente_aprobo y puestos_de_trabajo'
+        END AS missing_field
+      FROM vacantes_staging
+      WHERE agente_aprobo IS NULL OR puestos_de_trabajo IS NULL;
+    fetchType: STORE
+  
+  - id: convert_incomplete_to_csv
+    type: "io.kestra.plugin.serdes.csv.IonToCsv"
+    from: "{{ outputs.identify_jobs_incomplete_data.uri }}"
+
+  - id: send_email_with_attachment
+    type: io.kestra.plugin.notifications.mail.MailSend
+    from: "{{ kv('SENDER_EMAIL') }}"
+    to: "{{ kv('RECIPIENT_EMAILS') }}"
+    subject: "Incomplete Data Report - {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}"
+    htmlTextContent: |
+      <h2>Incomplete Job posting Data Report</h2>
+      <p>Please find attached the incomplete data report for <strong>{{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}</strong>.</p>
+      <p><strong>Total records processed this month is:</strong> {{ read(outputs.reading_monthly_registries.outputFiles['record_count.txt']) }}</p>
+      <p><strong>Total records with missing fields:</strong> {{ outputs.identify_jobs_incomplete_data.size }}</p>
+      <p>Please review and take appropriate action.</p>
+    attachments:
+      - name: incomplete_data_{{ inputs.month_of_interest }}_{{ inputs.year_of_interest }}.csv
+        uri: "{{ outputs.convert_incomplete_to_csv.uri }}"
+        contentType: text/csv
+    host: "{{ kv('SMTP_SERVER') }}"
+    port: "{{ kv('SMTP_PORT') }}"
+    username: "{{ kv('GMAIL_USERNAME') }}"
+    password: "{{ kv('GMAIL_APP_PASSWORD') }}"
+    transportStrategy: SMTP_TLS
+
+  - id: query_monthly_data_to_upload
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      SELECT
+        COALESCE(codigo_proceso::TEXT, '0') AS codigo_proceso, 
+        COALESCE(nombre_vacante, '') AS nombre_vacante,
+        COALESCE(cargo, '') AS cargo,
+        COALESCE(n_postulados, '0') AS n_postulados,
+        COALESCE(empresa, '') AS empresa,
+        COALESCE(tipodocumentoempresa, '') AS tipodocumentoempresa,
+        COALESCE(numerodocumentoempresa::TEXT, '0') AS numerodocumentoempresa, 
+        COALESCE(fecha_registro, '1970-01-01') AS fecha_registro, 
+        COALESCE(fecha_vencimiento, '1970-01-01') AS fecha_vencimiento,  
+        COALESCE(estado_actual, '') AS estado_actual, 
+        COALESCE(tipo_de_vacante, '') AS tipo_de_vacante,
+        COALESCE(puestos_de_trabajo, '0') AS puestos_de_trabajo,
+        COALESCE(tipo_de_contrato, '') AS tipo_de_contrato, 
+        COALESCE(agente_aprobo, '') AS agente_aprobo,
+        COALESCE(punto_atencion, '') AS punto_atencion, 
+        COALESCE(pais, '') AS pais,
+        COALESCE(mes::TEXT, '0') AS mes,
+        COALESCE(anio::TEXT, '0') AS anio,
+        COALESCE(created_at::TEXT, '') AS created_at,
+        COALESCE(filename, '') AS filename
+      FROM {{render(vars.staging_table)}}
+      WHERE EXTRACT(MONTH FROM fecha_registro) = {{ inputs.month_of_interest }}
+        AND EXTRACT(YEAR FROM fecha_registro) = {{ inputs.year_of_interest }};
+    store: true
+  
+  - id: convert_monthly_data_to_parquet
+    type: io.kestra.plugin.serdes.parquet.IonToParquet
+    from: "{{ outputs.query_monthly_data_to_upload.uri }}"
+  
+  - id: upload_monthly_data_to_gcs
+    type: io.kestra.plugin.gcp.gcs.Upload
+    from: "{{ outputs.convert_monthly_data_to_parquet.uri }}"
+    to: "gs://employment-agency-operational-data/{{ inputs.data_processed }}/{{ inputs.year_of_interest }}/{{ vars.month_name }}/vacantes_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}.parquet"
