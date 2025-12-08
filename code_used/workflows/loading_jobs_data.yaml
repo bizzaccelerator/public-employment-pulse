@@ -198,7 +198,7 @@ tasks:
         
         print(f"Successfully loaded {len(df)} rows to staging table")
 
-  - id: alter_companies_tables_add_columns
+  - id: alter_jobs_tables_add_columns
     type: io.kestra.plugin.jdbc.postgresql.Query
     url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
     username: "{{ kv('POSTGRES_USER') }}"
