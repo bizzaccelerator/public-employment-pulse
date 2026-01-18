@@ -1,4 +1,4 @@
-id: companies-raw-data-pipeline
+id: companies-raw-data-pipeline_2
 namespace: public_employment_pulse
 
 inputs:
@@ -301,36 +301,36 @@ tasks:
     password: "{{ kv('POSTGRES_PASSWORD') }}"
     sql: |
       SELECT
-        COALESCE(unique_row_id::TEXT, '') AS unique_row_id,
-        COALESCE(id::TEXT, '') AS id,
-        COALESCE(tipo_documento, '') AS tipo_documento,
+        unique_row_id,
+        id,
+        tipo_documento,
         COALESCE(numero_documento::TEXT, '0') AS numero_documento,
-        COALESCE(razon_social, '') AS razon_social,
-        COALESCE(naturaleza, '') AS naturaleza,
-        COALESCE(tipo_empresa, '') AS tipo_empresa,
-        COALESCE(actividad_economica, '') AS actividad_economica,
-        COALESCE(sector, '') AS sector,
-        COALESCE(tamanio, '') AS tamanio,
+        razon_social,
+        naturaleza,
+        tipo_empresa,
+        actividad_economica,
+        sector,
+        tamanio,
         COALESCE(codigo_sede::TEXT, '0') AS codigo_sede,
-        COALESCE(nombre_sede, '') AS nombre_sede, 
-        COALESCE(telefono::TEXT, '0') AS telefono,
-        COALESCE(direccion, '') AS direccion,
-        COALESCE(tipo_sede, '') AS tipo_sede,
-        COALESCE(ciudad, '') AS ciudad,
-        COALESCE(departamento, '') AS departamento,
-        COALESCE(nombre_administrador, '') AS nombre_administrador,
-        COALESCE(email_administrador, '') AS email_administrador,
-        COALESCE(fecha_registro::TEXT, '1970-01-01') AS fecha_registro,
-        COALESCE(canal_de_registro, '') AS canal_de_registro,
-        COALESCE(prestador_aprobo, '') AS prestador_aprobo,
-        COALESCE(agencia_aprobo, '') AS agencia_aprobo,
-        COALESCE(agente_aprobo, '') AS agente_aprobo,
-        COALESCE(pais, '') AS pais,
-        COALESCE(telefono_clean::TEXT, '0') AS telefono_clean,
-        COALESCE(mes::TEXT, '0') AS mes,
-        COALESCE(anio::TEXT, '0') AS anio,
-        COALESCE(created_at::TEXT, '') AS created_at,
-        COALESCE(filename, '') AS filename
+        nombre_sede,
+        telefono,
+        direccion,
+        tipo_sede,
+        ciudad,
+        departamento,
+        nombre_administrador,
+        email_administrador,
+        fecha_registro,
+        canal_de_registro,
+        prestador_aprobo,
+        agencia_aprobo,
+        agente_aprobo,
+        pais,
+        telefono_clean,
+        mes,
+        anio,
+        created_at,
+        filename
       FROM {{render(vars.staging_table)}}
       WHERE EXTRACT(MONTH FROM fecha_registro) = {{ inputs.month_of_interest }}
         AND EXTRACT(YEAR FROM fecha_registro) = {{ inputs.year_of_interest }};
