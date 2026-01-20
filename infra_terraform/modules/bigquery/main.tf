@@ -10,6 +10,9 @@ resource "google_bigquery_dataset" "main_dataset" {
     env  = "production"
     type = "data_warehouse"
   }
+  lifecycle {
+  ignore_changes = all
+  }
 }
 
 # Operations Dataset
@@ -23,5 +26,8 @@ resource "google_bigquery_dataset" "operations_dataset" {
   labels = {
     env  = "production"
     type = "operations"
+  }
+  lifecycle {
+  ignore_changes = all
   }
 }
