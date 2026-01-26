@@ -1,4 +1,4 @@
-id: companies-gcs-to-bigquery
+id: companies-gcs-to-bigquery-backfills
 namespace: public_employment_pulse
 
 inputs:
@@ -9,19 +9,6 @@ inputs:
     defaults: empresas
     values: [ registro_hv, orientacion, intermediacion, vacantes, empresas ]
 
-  - id: year_of_interest
-    type: SELECT
-    description: Year of data to load.
-    displayName: "Choose the year of interest."
-    defaults: "2025"
-    values: [ "2024", "2025" ]
-
-  - id: month_of_interest
-    type: INT
-    description: Month of data to load.
-    displayName: "Choose the month number of interest."
-    defaults: 1
-
   - id: load_mode
     type: SELECT
     description: How to load data into BigQuery.
@@ -30,10 +17,11 @@ inputs:
     values: [ WRITE_APPEND, WRITE_TRUNCATE, WRITE_EMPTY ]
 
 variables:
-  month_name: "{% set month_names = {1: 'january', 2: 'february', 3: 'march', 4: 'april', 5: 'may', 6: 'june', 7: 'july', 8: 'august', 9: 'september', 10: 'october', 11: 'november', 12: 'december'} %}{{ month_names[inputs.month_of_interest] }}"
-  gcs_path: "gs://employment-agency-operational-data/{{ inputs.data_processed }}/{{ inputs.year_of_interest }}/{{ vars.month_name }}/empresas_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}.parquet"
+  month_name: "{{ trigger.date | date('MMMM') | lower }}"
+  gcs_path: "gs://employment-agency-operational-data/{{ inputs.data_processed }}/{{ trigger.date | date('yyyy') }}/{{ vars.month_name }}/empresas_{{ trigger.date | date('yyyy') }}_{{ trigger.date | date('M') }}.parquet"
   bq_dataset: "operations_co"
   bq_table: "{{ inputs.data_processed }}"
+
 
 tasks:
   - id: log_workflow_start
@@ -53,11 +41,6 @@ tasks:
         location='US',
         description='Public Employment Pulse Data'
       );
-
-  # - id: drop_existing_table
-  #   type: io.kestra.plugin.gcp.bigquery.Query
-  #   sql: |
-  #     DROP TABLE IF EXISTS `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`;
 
   - id: create_bigquery_table
     type: io.kestra.plugin.gcp.bigquery.Query
@@ -209,7 +192,7 @@ tasks:
         MAX(fecha_registro) as latest_date,
         filename
       FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
-      WHERE filename = 'empresas_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}'
+      WHERE filename = 'empresas_{{ trigger.date | date('yyyy') }}_{{ trigger.date | date('M') }}'
       GROUP BY filename;
     store: true
 
@@ -221,7 +204,7 @@ tasks:
         COUNT(*) as count
       FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
       WHERE numero_documento IS NULL
-        AND filename = 'empresas_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}'
+        AND filename = 'empresas_{{ trigger.date | date('yyyy') }}_{{ trigger.date | date('M') }}'
       
       UNION ALL
       
@@ -230,8 +213,7 @@ tasks:
         COUNT(*) as count
       FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
       WHERE actividad_economica IS NULL OR actividad_economica = ''
-        AND filename = 'empresas_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}'
-      
+        AND filename = 'empresas_{{ trigger.date | date('yyyy') }}_{{ trigger.date | date('M') }}'
       UNION ALL
       
       SELECT
@@ -239,7 +221,7 @@ tasks:
         COUNT(*) as count
       FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
       WHERE direccion IS NULL OR direccion = ''
-        AND filename = 'empresas_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}'
+        AND filename = 'empresas_{{ trigger.date | date('yyyy') }}_{{ trigger.date | date('M') }}'
       
       ORDER BY count DESC;
     store: true
@@ -267,7 +249,7 @@ tasks:
     type: io.kestra.plugin.notifications.mail.MailSend
     from: "{{ kv('SENDER_EMAIL') }}"
     to: "{{ kv('RECIPIENT_EMAILS') }}"
-    subject: "BigQuery Load Complete - {{ inputs.data_processed }} {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}"
+    subject: "BigQuery Load Complete - {{ inputs.data_processed }} {{ trigger.date | date('M') }}/{{ trigger.date | date('yyyy') }}"
     htmlTextContent: |
       <h2>BigQuery Data Load Completed</h2>
       <p><strong>Dataset:</strong> {{ render(vars.bq_dataset) }}</p>
@@ -297,6 +279,4 @@ triggers:
     cron: "0 2 5 * *"  # Run at 2 AM on the 5th of each month
     inputs:
       data_processed: empresas
-      year_of_interest: "{{ now() | date('yyyy') }}"
-      month_of_interest: "{{ now() | date('M') | int }}"
       load_mode: WRITE_APPEND
