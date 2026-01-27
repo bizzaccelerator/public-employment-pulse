@@ -19,7 +19,7 @@ variables:
 tasks:
   - id: download_intermediation_file
     type: io.kestra.plugin.gcp.gcs.Download
-    from: gs://operations-raw-data_public-employment-pulse/Base de Intermediacion Laboral {{ inputs.year_of_interest}}.xlsx
+    from: gs://operations-raw-data_public-employment-pulse/Base de Intermediacion Laboral {{ trigger.date | date('yyyy') }}.xlsx
   
   - id: reading_monthly_registries
     type: io.kestra.plugin.scripts.python.Commands
