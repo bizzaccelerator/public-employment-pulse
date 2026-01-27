@@ -9,6 +9,18 @@ prev_year = int(os.getenv('YEAR'))
 
 df = pd.read_excel('intermediacion',sheet_name="BASE GENERAL")
 
+# Drop columns that are completely empty or have names like 'Unnamed'
+df = df.loc[:, ~df.columns.str.contains('^Unnamed', case=False, na=False)]
+
+# # Also drop columns where all values are NaN
+# df = df.dropna(axis=1, how='all')
+
+# Drop rows where all values are NaN
+df = df.dropna(axis=0, how='all')
+
+print(f"After cleanup shape: {df.shape}")
+print(f"After cleanup columns count: {len(df.columns)}")
+
 # Typing column the names 
 df.columns = df.columns.str.lower()
 df.columns = df.columns.str.replace(" ","_")

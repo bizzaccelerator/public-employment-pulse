@@ -19,7 +19,7 @@ variables:
 tasks:
   - id: download_intermediation_file
     type: io.kestra.plugin.gcp.gcs.Download
-    from: gs://operations-raw-data_public-employment-pulse/Base de Intermediacion Laboral 2025.xlsx
+    from: gs://operations-raw-data_public-employment-pulse/Base de Intermediacion Laboral {{ inputs.year_of_interest}}.xlsx
   
   - id: reading_monthly_registries
     type: io.kestra.plugin.scripts.python.Commands
@@ -46,7 +46,7 @@ tasks:
       - "registries_count.txt"
   
   - id: log_completion
-    type: io.kestra.core.tasks.log.Log
+    type: io.kestra.plugin.core.log.Log
     message: "Excel files processed successfully"
   
   - id: drop_tables_if_exists
@@ -348,9 +348,9 @@ tasks:
         gestor,
         intermediador,
         llamada_convocatoria_base_de_datos,
-        observacion_intermediacion,
-        observacion_gestion,
-        observacion_del_candidato,
+        COALESCE(observacion_intermediacion, '') as observacion_intermediacion,
+        COALESCE(observacion_gestion, '') as observacion_gestion,
+        COALESCE(observacion_del_candidato, '') as observacion_del_candidato,
         mes_de_colocacion_en_plataforma,
         colocado,
         semana_publicacion_vacante,
