@@ -14,6 +14,15 @@ registro = pd.read_excel('excel_file',sheet_name='BD_Acumulado-2024-2025')
 registro.columns = registro.columns.str.lower()
 registro.columns = registro.columns.str.replace(" ","_")
 
+# Drop columns that are completely empty or have names like 'Unnamed'
+registro = registro.loc[:, ~registro.columns.str.contains('^Unnamed', case=False, na=False)]
+
+# # Also drop columns where all values are NaN
+# df = df.dropna(axis=1, how='all')
+
+# Drop rows where all values are NaN
+registro = registro.dropna(axis=0, how='all')
+
 # cleaning the columns
 registro['número_documento'] = registro['número_documento'].astype(str).str.strip()
 registro['teléfono'] = registro['teléfono'].astype(str).str.strip()

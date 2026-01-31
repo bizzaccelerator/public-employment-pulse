@@ -59,7 +59,7 @@ tasks:
       - "record_count.txt"
 
   - id: log_completion
-    type: io.kestra.core.tasks.log.Log
+    type: io.kestra.plugin.core.log.Log
     message: "Excel file processed successfully"
   
   - id: drop_tables_if_exists
@@ -276,7 +276,7 @@ tasks:
         filename = '{{render(vars.file)}}';
 
   - id: log_staging_complete
-    type: io.kestra.core.tasks.log.Log
+    type: io.kestra.plugin.core.log.Log
     message: "Data loaded to staging table successfully"
 
   - id: registries_merge_data
@@ -372,23 +372,23 @@ tasks:
         COALESCE(titulo_homologado, '') as titulo_homologado,
         COALESCE(ciudad_de_residencia, '') as ciudad_de_residencia,
         COALESCE(email, '') as email,
-        COALESCE(fecha_registro, '1970-01-01') as fecha_registro,
+        COALESCE(fecha_registro::TIMESTAMP, '1970-01-01') as fecha_registro,
         COALESCE(programa_de_gobierno, '') as programa_de_gobierno,
         COALESCE(condiciones_especiales, '') as condiciones_especiales,
         COALESCE(detalle_discapacidades, '') as detalle_discapacidades,
         COALESCE(situacion_laboral, '') as situacion_laboral,
         COALESCE(agente_registra, '') as agente_registra,
-        COALESCE(fecha_actualizacion, '1970-01-01') as fecha_actualizacion,
+        COALESCE(fecha_actualizacion::TIMESTAMP, '1970-01-01') as fecha_actualizacion,
         COALESCE(porcentaje_hoja_vida, '') as porcentaje_hoja_vida,
         COALESCE(prestador_anterior, '') as prestador_anterior,
-        COALESCE(fecha_cambio_prestador, '1970-01-01') as fecha_cambio_prestador,
+        COALESCE(fecha_cambio_prestador::TIMESTAMP, '1970-01-01') as fecha_cambio_prestador,
         COALESCE(vereda_localidad_centro_poblado, '') as vereda_localidad_centro_poblado,
         COALESCE(pertenece_a, '') as pertenece_a,
         COALESCE(sise_offline, '') as sise_offline,
         COALESCE(mes, 0) as mes,
         COALESCE(anio, 0) as anio,
         COALESCE(punto_atencion, '') as punto_atencion, 
-        COALESCE(fecha_accion, '1970-01-01') as fecha_accion,
+        COALESCE(fecha_accion::TIMESTAMP, '1970-01-01') as fecha_accion,
         COALESCE(grupos_etnicos, '') as grupos_etnicos,
         COALESCE(vca, '') as vca,
         COALESCE(discapacidad, '') as discapacidad,
@@ -396,10 +396,10 @@ tasks:
         COALESCE(vvg, '') as vvg,
         COALESCE(reincorporados, '') as reincorporados,
         COALESCE(filename, '') as filename,
-        COALESCE(created_at, '1970-01-01') as created_at
+        COALESCE(created_at::TIMESTAMP, '1970-01-01') as created_at
       FROM {{render(vars.table)}}
       WHERE mes = {{ inputs.month_of_interest }} AND anio = {{ inputs.year_of_interest }};
-    store: true 
+    fetchType: STORE
   
   - id: convert_monthly_data_to_parquet
     type: io.kestra.plugin.serdes.parquet.IonToParquet
@@ -409,78 +409,3 @@ tasks:
     type: io.kestra.plugin.gcp.gcs.Upload
     from: "{{ outputs.convert_monthly_data_to_parquet.uri }}"
     to: "gs://employment-agency-operational-data/{{ inputs.data_processed }}/{{ inputs.year_of_interest }}/{{ vars.month_name }}/registro_hv_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}.parquet"
-
-  # - id: export_monthly_data_to_parquet
-  #   type: io.kestra.plugin.scripts.python.Script
-  #   docker:
-  #     image: python:3.11-slim
-  #   description: "Export PostgreSQL data to Parquet format"
-  #   beforeCommands:
-  #     - pip install pandas sqlalchemy psycopg2-binary pyarrow fastparquet
-  #   env:
-  #     DB_HOST: "{{ kv('POSTGRES_HOST') }}"
-  #     DB_PORT: "{{ kv('POSTGRES_PORT') }}"
-  #     DB_NAME: "{{ kv('POSTGRES_DB') }}"
-  #     DB_USER: "{{ kv('POSTGRES_USER') }}"
-  #     DB_PASSWORD: "{{ kv('POSTGRES_PASSWORD') }}"
-  #     YEAR: "{{ inputs.year_of_interest }}"
-  #     MONTH: "{{ inputs.month_of_interest }}"
-  #     TABLE_NAME: "{{ render(vars.table) }}"
-  #   script: |
-  #     import pandas as pd
-  #     import numpy as np
-  #     from sqlalchemy import create_engine
-  #     import os
-      
-  #     # Database connection
-  #     connection_string = f"postgresql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT', '5432')}/{os.getenv('DB_NAME')}"
-  #     engine = create_engine(connection_string)
-      
-  #     # Query data from the main table
-  #     table_name = os.getenv('TABLE_NAME')
-  #     year = os.getenv('YEAR')
-  #     month = os.getenv('MONTH')
-      
-  #     query = f"SELECT * FROM {table_name}"
-      
-  #     print(f"Executing query: {query}")
-      
-  #     # Read data into DataFrame
-  #     df = pd.read_sql(query, engine)
-      
-  #     print(f"Retrieved {len(df)} rows from {table_name}")
-  #     print(f"Columns: {list(df.columns)}")
-      
-  #     # Optimize data types for Parquet
-  #     # Convert datetime columns to proper datetime type
-  #     date_columns = ['fecha_registro', 'fecha_actualizacion', 'fecha_cambio_prestador', 'fecha_accion', 'created_at']
-  #     for col in date_columns:
-  #         if col in df.columns:
-  #             df[col] = pd.to_datetime(df[col], errors='coerce')
-      
-  #     # Convert integer columns
-  #     int_columns = ['id', 'no', 'edad', 'mes', 'anio']
-  #     for col in int_columns:
-  #         if col in df.columns:
-  #             df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
-      
-  #     # Generate filename
-  #     output_filename = f"registro_hv_{year}_{month}.parquet"
-      
-  #     # Save to Parquet with optimal compression
-  #     df.to_parquet(
-  #         output_filename,
-  #         engine='pyarrow',
-  #         compression='snappy',
-  #         index=False
-  #     )
-      
-  #     print(f"Successfully saved {len(df)} rows to {output_filename}")
-  #     print(f"File size: {os.path.getsize(output_filename) / (1024*1024):.2f} MB")
-  #   outputFiles:
-  #     - "*.parquet"
-
-  # - id: upload_monthly_data_to_gcs
-  #   type: io.kestra.plugin.gcp.gcs.Upload
-  #   from: "{{ outputs.export_monthly_data_to_parquet.outputFiles['registro_hv_'~ inputs.year_of_interest ~'_'~ inputs.month_of_interest ~'.parquet'] }}"
-  #   to: "gs://employment-agency-operational-data/{{ inputs.year_of_interest }}/{{ inputs.month_of_interest }}/registro_hv_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}.parquet"

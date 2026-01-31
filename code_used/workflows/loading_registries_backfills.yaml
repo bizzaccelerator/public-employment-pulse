@@ -31,7 +31,7 @@ tasks:
     namespaceFiles:
       enabled: true
       include:
-        - "registro_hv_updated.py"
+        - "registro_hv.py"
     beforeCommands:
       - pip install pandas numpy datetime openpyxl pyarrow fastparquet
     inputFiles:
@@ -40,12 +40,12 @@ tasks:
       MONTH: "{{ trigger.date | date('M') }}"
       YEAR: "{{ trigger.date | date('yyyy') }}"
     commands:
-      - "python registro_hv_updated.py"
+      - "python registro_hv.py"
     outputFiles:
       - "*.parquet"
 
   - id: log_completion
-    type: io.kestra.core.tasks.log.Log
+    type: io.kestra.plugin.core.log.Log
     message: "Excel file processed successfully"
   
   - id: drop_tables_if_exists
@@ -262,7 +262,7 @@ tasks:
         filename = '{{render(vars.file)}}';
 
   - id: log_staging_complete
-    type: io.kestra.core.tasks.log.Log
+    type: io.kestra.plugin.core.log.Log
     message: "Data loaded to staging table successfully"
 
   - id: registries_merge_data
@@ -357,23 +357,23 @@ tasks:
         COALESCE(titulo_homologado, '') as titulo_homologado,
         COALESCE(ciudad_de_residencia, '') as ciudad_de_residencia,
         COALESCE(email, '') as email,
-        COALESCE(fecha_registro, '1970-01-01') as fecha_registro,
+        COALESCE(fecha_registro::TIMESTAMP, '1970-01-01') as fecha_registro,
         COALESCE(programa_de_gobierno, '') as programa_de_gobierno,
         COALESCE(condiciones_especiales, '') as condiciones_especiales,
         COALESCE(detalle_discapacidades, '') as detalle_discapacidades,
         COALESCE(situacion_laboral, '') as situacion_laboral,
         COALESCE(agente_registra, '') as agente_registra,
-        COALESCE(fecha_actualizacion, '1970-01-01') as fecha_actualizacion,
+        COALESCE(fecha_actualizacion::TIMESTAMP, '1970-01-01') as fecha_actualizacion,
         COALESCE(porcentaje_hoja_vida, '') as porcentaje_hoja_vida,
         COALESCE(prestador_anterior, '') as prestador_anterior,
-        COALESCE(fecha_cambio_prestador, '1970-01-01') as fecha_cambio_prestador,
+        COALESCE(fecha_cambio_prestador::TIMESTAMP, '1970-01-01') as fecha_cambio_prestador,
         COALESCE(vereda_localidad_centro_poblado, '') as vereda_localidad_centro_poblado,
         COALESCE(pertenece_a, '') as pertenece_a,
         COALESCE(sise_offline, '') as sise_offline,
         COALESCE(mes, 0) as mes,
         COALESCE(anio, 0) as anio,
         COALESCE(punto_atencion, '') as punto_atencion, 
-        COALESCE(fecha_accion, '1970-01-01') as fecha_accion,
+        COALESCE(fecha_accion::TIMESTAMP, '1970-01-01') as fecha_accion,
         COALESCE(grupos_etnicos, '') as grupos_etnicos,
         COALESCE(vca, '') as vca,
         COALESCE(discapacidad, '') as discapacidad,
@@ -381,7 +381,7 @@ tasks:
         COALESCE(vvg, '') as vvg,
         COALESCE(reincorporados, '') as reincorporados,
         COALESCE(filename, '') as filename,
-        COALESCE(created_at, '1970-01-01') as created_at
+        COALESCE(created_at::TIMESTAMP, '1970-01-01') as created_at
       FROM {{render(vars.table)}}
       WHERE mes = {{ trigger.date | date('M') }} AND anio = {{ trigger.date | date('yyyy') }};
     store: true 
