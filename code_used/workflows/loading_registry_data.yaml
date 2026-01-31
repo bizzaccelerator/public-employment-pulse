@@ -94,15 +94,15 @@ tasks:
           edad INTEGER,
           rango_edad VARCHAR(50),
           genero VARCHAR(50),
-          nivel_de_estudio VARCHAR(100),
+          nivel_de_estudio VARCHAR(200),
           titulo_homologado VARCHAR(255),
-          ciudad_de_residencia VARCHAR(100),
+          ciudad_de_residencia VARCHAR(200),
           email VARCHAR(255),
           fecha_registro TIMESTAMP,
           programa_de_gobierno VARCHAR(255),
           condiciones_especiales TEXT,
           detalle_discapacidades TEXT,
-          situacion_laboral VARCHAR(100),
+          situacion_laboral VARCHAR(200),
           agente_registra VARCHAR(255),
           fecha_actualizacion TIMESTAMP,
           porcentaje_hoja_vida VARCHAR(20),
@@ -205,6 +205,12 @@ tasks:
         
         # Rename columns
         df = df.rename(columns=column_mapping)
+
+        if 'numero_documento' in df.columns:
+            # Convert to numeric, coercing errors to NaN
+            df['numero_documento'] = pd.to_numeric(df['numero_documento'], errors='coerce')
+            # Convert to Int64 (nullable integer type)
+            df['numero_documento'] = df['numero_documento'].astype('Int64')
         
         # Convert date columns with proper format
         date_columns = ['fecha_registro', 'fecha_actualizacion', 'fecha_cambio_prestador', 'fecha_accion']
