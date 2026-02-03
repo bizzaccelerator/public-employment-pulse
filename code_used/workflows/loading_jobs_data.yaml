@@ -276,6 +276,7 @@ tasks:
     password: "{{ kv('GMAIL_APP_PASSWORD') }}"
     transportStrategy: SMTP_TLS
 
+  # CORRECTED TASK - Query with proper data types
   - id: query_monthly_data_to_upload
     type: io.kestra.plugin.jdbc.postgresql.Query
     url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
@@ -283,26 +284,26 @@ tasks:
     password: "{{ kv('POSTGRES_PASSWORD') }}"
     sql: |
       SELECT
-        COALESCE(codigo_proceso::TEXT, '0') AS codigo_proceso, 
-        COALESCE(nombre_vacante, '') AS nombre_vacante,
-        COALESCE(cargo, '') AS cargo,
-        COALESCE(n_postulados, '0') AS n_postulados,
-        COALESCE(empresa, '') AS empresa,
-        COALESCE(tipodocumentoempresa, '') AS tipodocumentoempresa,
-        COALESCE(numerodocumentoempresa::TEXT, '0') AS numerodocumentoempresa, 
-        COALESCE(fecha_registro, '1970-01-01') AS fecha_registro, 
-        COALESCE(fecha_vencimiento, '1970-01-01') AS fecha_vencimiento,  
-        COALESCE(estado_actual, '') AS estado_actual, 
-        COALESCE(tipo_de_vacante, '') AS tipo_de_vacante,
-        COALESCE(puestos_de_trabajo, '0') AS puestos_de_trabajo,
-        COALESCE(tipo_de_contrato, '') AS tipo_de_contrato, 
-        COALESCE(agente_aprobo, '') AS agente_aprobo,
-        COALESCE(punto_atencion, '') AS punto_atencion, 
-        COALESCE(pais, '') AS pais,
-        COALESCE(mes::TEXT, '0') AS mes,
-        COALESCE(anio::TEXT, '0') AS anio,
-        COALESCE(created_at::TEXT, '') AS created_at,
-        COALESCE(filename, '') AS filename
+        codigo_proceso, 
+        nombre_vacante,
+        cargo,
+        n_postulados,
+        empresa,
+        tipodocumentoempresa,
+        COALESCE(numerodocumentoempresa::TEXT, '0') AS numerodocumentoempresa,
+        fecha_registro, 
+        fecha_vencimiento,  
+        estado_actual, 
+        tipo_de_vacante,
+        puestos_de_trabajo,
+        tipo_de_contrato, 
+        agente_aprobo,
+        punto_atencion, 
+        pais,
+        mes,
+        anio,
+        created_at,
+        filename
       FROM {{render(vars.staging_table)}}
       WHERE EXTRACT(MONTH FROM fecha_registro) = {{ inputs.month_of_interest }}
         AND EXTRACT(YEAR FROM fecha_registro) = {{ inputs.year_of_interest }};
