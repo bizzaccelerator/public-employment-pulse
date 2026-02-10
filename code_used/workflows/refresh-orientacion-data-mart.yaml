@@ -591,23 +591,23 @@ tasks:
               -- Primary demographic segment (mutually exclusive priority order)
               CASE
                 WHEN grupos_etnicos IS NOT NULL AND grupos_etnicos != '' THEN 'Grupos Étnicos'
-                WHEN vca = 'Sí' THEN 'VCA (Víctimas Conflicto)'
-                WHEN discapacidad = 'Sí' THEN 'Personas con Discapacidad'
-                WHEN migrante = 'Sí' THEN 'Migrantes'
-                WHEN vvg = 'Sí' THEN 'VVG (Víctimas Violencia)'
-                WHEN reincorporados = 'Sí' THEN 'Reincorporados'
+                WHEN vca IS NOT NULL AND vca != '' THEN 'VCA (Víctimas Conflicto)'
+                WHEN discapacidad IS NOT NULL AND discapacidad != '' THEN 'Personas con Discapacidad'
+                WHEN migrante IS NOT NULL AND migrante != '' THEN 'Migrantes'
+                WHEN vvg IS NOT NULL AND vvg != '' THEN 'VVG (Víctimas Violencia)'
+                WHEN reincorporados IS NOT NULL AND reincorporados != '' THEN 'Reincorporados'
                 ELSE 'Población General'
               END AS segmento_demografico,
               
               -- Age group standardization
               CASE
                 WHEN edad < 18 THEN 'Menor de 18'
-                WHEN edad BETWEEN 18 AND 25 THEN '18-25 años'
-                WHEN edad BETWEEN 26 AND 35 THEN '26-35 años'
-                WHEN edad BETWEEN 36 AND 45 THEN '36-45 años'
-                WHEN edad BETWEEN 46 AND 55 THEN '46-55 años'
-                WHEN edad >= 56 THEN '56+ años'
-                ELSE 'Edad no especificada'
+                WHEN edad BETWEEN 18 AND 28 THEN '18-28'
+                WHEN edad BETWEEN 29 AND 39 THEN '29-39'
+                WHEN edad BETWEEN 40 AND 49 THEN '40-49'
+                WHEN edad BETWEEN 50 AND 59 THEN '50-59'
+                WHEN edad > 60 THEN 'Más de 60'
+                ELSE 'Desconocido'
               END AS grupo_edad_estandar
               
             FROM demographic_base
@@ -814,21 +814,21 @@ tasks:
                 *,
                 CASE
                   WHEN grupos_etnicos IS NOT NULL AND grupos_etnicos != '' THEN 'Grupos Étnicos'
-                  WHEN vca = 'Sí' THEN 'VCA (Víctimas Conflicto)'
-                  WHEN discapacidad = 'Sí' THEN 'Personas con Discapacidad'
-                  WHEN migrante = 'Sí' THEN 'Migrantes'
-                  WHEN vvg = 'Sí' THEN 'VVG (Víctimas Violencia)'
-                  WHEN reincorporados = 'Sí' THEN 'Reincorporados'
+                  WHEN vca IS NOT NULL AND vca != '' THEN 'VCA (Víctimas Conflicto)'
+                  WHEN discapacidad IS NOT NULL AND discapacidad != '' THEN 'Personas con Discapacidad'
+                  WHEN migrante IS NOT NULL AND migrante != '' THEN 'Migrantes'
+                  WHEN vvg IS NOT NULL AND vvg != '' THEN 'VVG (Víctimas Violencia)'
+                  WHEN reincorporados IS NOT NULL AND reincorporados != '' THEN 'Reincorporados'
                   ELSE 'Población General'
                 END AS segmento_demografico,
                 CASE
                   WHEN edad < 18 THEN 'Menor de 18'
-                  WHEN edad BETWEEN 18 AND 25 THEN '18-25 años'
-                  WHEN edad BETWEEN 26 AND 35 THEN '26-35 años'
-                  WHEN edad BETWEEN 36 AND 45 THEN '36-45 años'
-                  WHEN edad BETWEEN 46 AND 55 THEN '46-55 años'
-                  WHEN edad >= 56 THEN '56+ años'
-                  ELSE 'Edad no especificada'
+                  WHEN edad BETWEEN 18 AND 28 THEN '18-28'
+                  WHEN edad BETWEEN 29 AND 39 THEN '29-39'
+                  WHEN edad BETWEEN 40 AND 49 THEN '40-49'
+                  WHEN edad BETWEEN 50 AND 59 THEN '50-59'
+                  WHEN edad > 60 THEN 'Más de 60'
+                  ELSE 'Desconocido'
                 END AS grupo_edad_estandar
               FROM demographic_base
             ),
