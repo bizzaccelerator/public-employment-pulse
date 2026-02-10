@@ -6,6 +6,11 @@ description: |
   Creates two optimized, pre-aggregated tables for analytics and reporting:
   1. dm_orientation_funnel_monthly - Orientation to workshop conversion metrics
   2. dm_population_demographics - Demographic profile and equity analysis
+  
+  IMPORTANT: In dm_population_demographics:
+  - personas_unicas_con_orientacion counts people based on fechaejecucion_orientacion month
+  - personas_unicas_con_taller counts people based on fechaejecucion_taller month
+  - These can be in different months/years for the same person
 
 inputs:
   - id: full_refresh
@@ -541,6 +546,8 @@ tasks:
         type: io.kestra.plugin.gcp.bigquery.Query
         sql: |
           -- Full refresh: recreate entire demographics table
+          -- CRITICAL: This mart uses periodo_mes from fechaejecucion_orientacion
+          -- personas_unicas_con_orientacion and personas_unicas_con_taller are calculated separately
           CREATE OR REPLACE TABLE `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_demographics) }}`
           PARTITION BY DATE_TRUNC(periodo_mes, MONTH)
           CLUSTER BY departamento, segmento_demografico
@@ -549,46 +556,27 @@ tasks:
             labels=[("domain", "employment"), ("refresh_type", "monthly")]
           )
           AS
-          WITH demographic_base AS (
+          WITH base_data AS (
             SELECT
-              DATE_TRUNC(DATE(fechaejecucion_orientacion), MONTH) AS periodo_mes,
-              EXTRACT(YEAR FROM fechaejecucion_orientacion) AS year,
-              EXTRACT(MONTH FROM fechaejecucion_orientacion) AS month,
-              EXTRACT(QUARTER FROM fechaejecucion_orientacion) AS quarter,
-              FORMAT_DATE('%B', fechaejecucion_orientacion) AS month_name,
-              FORMAT_DATE('%Y-%m', fechaejecucion_orientacion) AS year_month,
+              numerodocumento,
               departamento,
               ciudad,
-              
-              -- Person identifier
-              numerodocumento,
-              
-              -- Demographics
               edad,
               rango_de_edad,
               sexo,
-              
-              -- Special populations (vulnerability indicators)
               grupos_etnicos,
-              vca,  -- Víctimas del conflicto armado
+              vca,
               discapacidad,
               migrante,
-              vvg,  -- Víctimas de violencia de género
+              vvg,
               reincorporados,
               condiciones_especiales,
+              fechaejecucion_orientacion,
+              fechaejecucion_taller,
+              anio_taller,
+              mes_taller,
               
-              -- Service received
-              CASE WHEN fechaejecucion_taller IS NOT NULL THEN 1 ELSE 0 END AS asistio_taller
-              
-            FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_operations) }}.{{ render(vars.base_table) }}`
-            WHERE fechaejecucion_orientacion IS NOT NULL
-          ),
-          
-          -- Create demographic segments
-          demographic_segments AS (
-            SELECT
-              *,
-              -- Primary demographic segment (mutually exclusive priority order)
+              -- Demographic segment
               CASE
                 WHEN grupos_etnicos IS NOT NULL AND grupos_etnicos != '' THEN 'Grupos Étnicos'
                 WHEN vca IS NOT NULL AND vca != '' THEN 'VCA (Víctimas Conflicto)'
@@ -599,7 +587,7 @@ tasks:
                 ELSE 'Población General'
               END AS segmento_demografico,
               
-              -- Age group standardization
+              -- Age group
               CASE
                 WHEN edad < 18 THEN 'Menor de 18'
                 WHEN edad BETWEEN 18 AND 28 THEN '18-28'
@@ -610,42 +598,161 @@ tasks:
                 ELSE 'Desconocido'
               END AS grupo_edad_estandar
               
-            FROM demographic_base
+            FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_operations) }}.{{ render(vars.base_table) }}`
+            WHERE fechaejecucion_orientacion IS NOT NULL
           ),
           
-          monthly_demographics AS (
+          -- Get orientations by month (based on fechaejecucion_orientacion)
+          orientations_by_month AS (
+            SELECT
+              DATE_TRUNC(DATE(fechaejecucion_orientacion), MONTH) AS periodo_mes,
+              departamento,
+              ciudad,
+              segmento_demografico,
+              grupo_edad_estandar,
+              sexo,
+              numerodocumento
+            FROM base_data
+          ),
+          
+          -- Get workshops by month (based on fechaejecucion_taller)
+          workshops_by_month AS (
+            SELECT
+              DATE_TRUNC(DATE(fechaejecucion_taller), MONTH) AS periodo_mes,
+              departamento,
+              ciudad,
+              segmento_demografico,
+              grupo_edad_estandar,
+              sexo,
+              numerodocumento
+            FROM base_data
+            WHERE fechaejecucion_taller IS NOT NULL
+          ),
+          
+          -- Get all unique period-dimension combinations from both orientations and workshops
+          all_periods AS (
+            SELECT DISTINCT periodo_mes, departamento, ciudad, segmento_demografico, grupo_edad_estandar, sexo
+            FROM orientations_by_month
+            UNION DISTINCT
+            SELECT DISTINCT periodo_mes, departamento, ciudad, segmento_demografico, grupo_edad_estandar, sexo
+            FROM workshops_by_month
+          ),
+          
+          -- Calculate orientation metrics
+          orientation_metrics AS (
             SELECT
               periodo_mes,
-              year,
-              month,
-              quarter,
-              month_name,
-              year_month,
+              departamento,
+              ciudad,
+              segmento_demografico,
+              grupo_edad_estandar,
+              sexo,
+              COUNT(DISTINCT numerodocumento) AS personas_unicas_con_orientacion
+            FROM orientations_by_month
+            GROUP BY 1, 2, 3, 4, 5, 6
+          ),
+          
+          -- Calculate workshop metrics
+          workshop_metrics AS (
+            SELECT
+              periodo_mes,
+              departamento,
+              ciudad,
+              segmento_demografico,
+              grupo_edad_estandar,
+              sexo,
+              COUNT(DISTINCT numerodocumento) AS personas_unicas_con_taller
+            FROM workshops_by_month
+            GROUP BY 1, 2, 3, 4, 5, 6
+          ),
+          
+          -- Join all data and calculate additional metrics
+          monthly_demographics AS (
+            SELECT
+              p.periodo_mes,
+              EXTRACT(YEAR FROM p.periodo_mes) AS year,
+              EXTRACT(MONTH FROM p.periodo_mes) AS month,
+              EXTRACT(QUARTER FROM p.periodo_mes) AS quarter,
+              FORMAT_DATE('%B', p.periodo_mes) AS month_name,
+              FORMAT_DATE('%Y-%m', p.periodo_mes) AS year_month,
+              p.departamento,
+              p.ciudad,
+              p.segmento_demografico,
+              p.grupo_edad_estandar,
+              p.sexo,
+              
+              -- Unique people counts based on their respective dates
+              COALESCE(o.personas_unicas_con_orientacion, 0) AS personas_unicas_con_orientacion,
+              COALESCE(w.personas_unicas_con_taller, 0) AS personas_unicas_con_taller,
+              
+              -- personas_unicas = max of orientation or workshop counts for this period
+              GREATEST(
+                COALESCE(o.personas_unicas_con_orientacion, 0),
+                COALESCE(w.personas_unicas_con_taller, 0)
+              ) AS personas_unicas
+              
+            FROM all_periods p
+            LEFT JOIN orientation_metrics o
+              ON p.periodo_mes = o.periodo_mes
+              AND p.departamento = o.departamento
+              AND IFNULL(p.ciudad, '') = IFNULL(o.ciudad, '')
+              AND p.segmento_demografico = o.segmento_demografico
+              AND p.grupo_edad_estandar = o.grupo_edad_estandar
+              AND IFNULL(p.sexo, '') = IFNULL(o.sexo, '')
+            LEFT JOIN workshop_metrics w
+              ON p.periodo_mes = w.periodo_mes
+              AND p.departamento = w.departamento
+              AND IFNULL(p.ciudad, '') = IFNULL(w.ciudad, '')
+              AND p.segmento_demografico = w.segmento_demografico
+              AND p.grupo_edad_estandar = w.grupo_edad_estandar
+              AND IFNULL(p.sexo, '') = IFNULL(w.sexo, '')
+          ),
+          
+          -- Get additional stats from base data aggregated by orientation month
+          additional_stats AS (
+            SELECT
+              DATE_TRUNC(DATE(fechaejecucion_orientacion), MONTH) AS periodo_mes,
               departamento,
               ciudad,
               segmento_demografico,
               grupo_edad_estandar,
               sexo,
               
-              -- Core counts
-              COUNT(DISTINCT numerodocumento) AS personas_unicas,
               COUNT(*) AS total_orientaciones,
-              SUM(asistio_taller) AS personas_con_taller,
+              SUM(CASE WHEN fechaejecucion_taller IS NOT NULL THEN 1 ELSE 0 END) AS personas_con_taller,
               
-              -- Conversion to workshop
-              ROUND(SAFE_DIVIDE(SUM(asistio_taller), COUNT(DISTINCT numerodocumento)) * 100, 2) AS tasa_conversion_taller_pct,
+              -- Workshop attendance in period (using anio_taller and mes_taller)
+              COUNT(DISTINCT CASE 
+                WHEN anio_taller = EXTRACT(YEAR FROM DATE_TRUNC(DATE(fechaejecucion_orientacion), MONTH))
+                  AND mes_taller = EXTRACT(MONTH FROM DATE_TRUNC(DATE(fechaejecucion_orientacion), MONTH))
+                THEN numerodocumento 
+              END) AS personas_taller_en_periodo,
               
-              -- Age statistics
+              COUNTIF(
+                anio_taller = EXTRACT(YEAR FROM DATE_TRUNC(DATE(fechaejecucion_orientacion), MONTH))
+                AND mes_taller = EXTRACT(MONTH FROM DATE_TRUNC(DATE(fechaejecucion_orientacion), MONTH))
+                AND sexo = 'M'
+              ) AS hombres_taller_en_periodo,
+              
+              COUNTIF(
+                anio_taller = EXTRACT(YEAR FROM DATE_TRUNC(DATE(fechaejecucion_orientacion), MONTH))
+                AND mes_taller = EXTRACT(MONTH FROM DATE_TRUNC(DATE(fechaejecucion_orientacion), MONTH))
+                AND sexo = 'F'
+              ) AS mujeres_taller_en_periodo,
+              
+              ROUND(SAFE_DIVIDE(
+                SUM(CASE WHEN fechaejecucion_taller IS NOT NULL THEN 1 ELSE 0 END),
+                COUNT(DISTINCT numerodocumento)
+              ) * 100, 2) AS tasa_conversion_taller_pct,
+              
               ROUND(AVG(edad), 1) AS edad_promedio,
               MIN(edad) AS edad_minima,
               MAX(edad) AS edad_maxima,
               
-              -- Gender distribution
               COUNTIF(sexo = 'M') AS hombres,
               COUNTIF(sexo = 'F') AS mujeres,
               COUNTIF(sexo NOT IN ('M', 'F') OR sexo IS NULL) AS sexo_no_especificado,
               
-              -- Vulnerability flags (cumulative - person may have multiple)
               COUNTIF(grupos_etnicos IS NOT NULL AND grupos_etnicos != '') AS con_grupo_etnico,
               COUNTIF(vca = 'Sí') AS victimas_conflicto,
               COUNTIF(discapacidad = 'Sí') AS con_discapacidad,
@@ -653,7 +760,6 @@ tasks:
               COUNTIF(vvg = 'Sí') AS victimas_violencia_genero,
               COUNTIF(reincorporados = 'Sí') AS reincorporados,
               
-              -- Multiple vulnerabilities
               COUNTIF(
                 (CASE WHEN grupos_etnicos IS NOT NULL AND grupos_etnicos != '' THEN 1 ELSE 0 END) +
                 (CASE WHEN vca = 'Sí' THEN 1 ELSE 0 END) +
@@ -663,303 +769,415 @@ tasks:
                 (CASE WHEN reincorporados = 'Sí' THEN 1 ELSE 0 END) > 1
               ) AS con_multiples_vulnerabilidades
               
-            FROM demographic_segments
-            GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
+            FROM base_data
+            GROUP BY 1, 2, 3, 4, 5, 6
           )
           
           SELECT
-            -- Date dimensions
-            periodo_mes,
-            year,
-            month,
-            quarter,
-            month_name,
-            year_month,
-            
-            -- Geographic dimensions
-            departamento,
-            ciudad,
-            
-            -- Demographic dimensions
-            segmento_demografico,
-            grupo_edad_estandar,
-            sexo,
+            m.periodo_mes,
+            m.year,
+            m.month,
+            m.quarter,
+            m.month_name,
+            m.year_month,
+            m.departamento,
+            m.ciudad,
+            m.segmento_demografico,
+            m.grupo_edad_estandar,
+            m.sexo,
             
             -- Core metrics
-            personas_unicas,
-            total_orientaciones,
-            personas_con_taller,
-            tasa_conversion_taller_pct,
+            m.personas_unicas,
+            m.personas_unicas_con_orientacion,
+            m.personas_unicas_con_taller,
+            
+            COALESCE(s.total_orientaciones, 0) AS total_orientaciones,
+            COALESCE(s.personas_con_taller, 0) AS personas_con_taller,
+            COALESCE(s.personas_taller_en_periodo, 0) AS personas_taller_en_periodo,
+            COALESCE(s.hombres_taller_en_periodo, 0) AS hombres_taller_en_periodo,
+            COALESCE(s.mujeres_taller_en_periodo, 0) AS mujeres_taller_en_periodo,
+            COALESCE(s.tasa_conversion_taller_pct, 0) AS tasa_conversion_taller_pct,
             
             -- Age statistics
-            edad_promedio,
-            edad_minima,
-            edad_maxima,
+            s.edad_promedio,
+            s.edad_minima,
+            s.edad_maxima,
             
             -- Gender distribution
-            hombres,
-            mujeres,
-            sexo_no_especificado,
+            COALESCE(s.hombres, 0) AS hombres,
+            COALESCE(s.mujeres, 0) AS mujeres,
+            COALESCE(s.sexo_no_especificado, 0) AS sexo_no_especificado,
             
-            -- Gender percentages
-            ROUND(SAFE_DIVIDE(hombres, personas_unicas) * 100, 2) AS pct_hombres,
-            ROUND(SAFE_DIVIDE(mujeres, personas_unicas) * 100, 2) AS pct_mujeres,
+            ROUND(SAFE_DIVIDE(s.hombres, m.personas_unicas) * 100, 2) AS pct_hombres,
+            ROUND(SAFE_DIVIDE(s.mujeres, m.personas_unicas) * 100, 2) AS pct_mujeres,
             
             -- Vulnerability counts
-            con_grupo_etnico,
-            victimas_conflicto,
-            con_discapacidad,
-            migrantes,
-            victimas_violencia_genero,
-            reincorporados,
-            con_multiples_vulnerabilidades,
+            COALESCE(s.con_grupo_etnico, 0) AS con_grupo_etnico,
+            COALESCE(s.victimas_conflicto, 0) AS victimas_conflicto,
+            COALESCE(s.con_discapacidad, 0) AS con_discapacidad,
+            COALESCE(s.migrantes, 0) AS migrantes,
+            COALESCE(s.victimas_violencia_genero, 0) AS victimas_violencia_genero,
+            COALESCE(s.reincorporados, 0) AS reincorporados,
+            COALESCE(s.con_multiples_vulnerabilidades, 0) AS con_multiples_vulnerabilidades,
             
             -- Vulnerability percentages
-            ROUND(SAFE_DIVIDE(con_grupo_etnico, personas_unicas) * 100, 2) AS pct_grupo_etnico,
-            ROUND(SAFE_DIVIDE(victimas_conflicto, personas_unicas) * 100, 2) AS pct_vca,
-            ROUND(SAFE_DIVIDE(con_discapacidad, personas_unicas) * 100, 2) AS pct_discapacidad,
-            ROUND(SAFE_DIVIDE(migrantes, personas_unicas) * 100, 2) AS pct_migrante,
-            ROUND(SAFE_DIVIDE(victimas_violencia_genero, personas_unicas) * 100, 2) AS pct_vvg,
-            ROUND(SAFE_DIVIDE(reincorporados, personas_unicas) * 100, 2) AS pct_reincorporados,
-            ROUND(SAFE_DIVIDE(con_multiples_vulnerabilidades, personas_unicas) * 100, 2) AS pct_multiples_vulnerabilidades,
+            ROUND(SAFE_DIVIDE(s.con_grupo_etnico, m.personas_unicas) * 100, 2) AS pct_grupo_etnico,
+            ROUND(SAFE_DIVIDE(s.victimas_conflicto, m.personas_unicas) * 100, 2) AS pct_vca,
+            ROUND(SAFE_DIVIDE(s.con_discapacidad, m.personas_unicas) * 100, 2) AS pct_discapacidad,
+            ROUND(SAFE_DIVIDE(s.migrantes, m.personas_unicas) * 100, 2) AS pct_migrante,
+            ROUND(SAFE_DIVIDE(s.victimas_violencia_genero, m.personas_unicas) * 100, 2) AS pct_vvg,
+            ROUND(SAFE_DIVIDE(s.reincorporados, m.personas_unicas) * 100, 2) AS pct_reincorporados,
+            ROUND(SAFE_DIVIDE(s.con_multiples_vulnerabilidades, m.personas_unicas) * 100, 2) AS pct_multiples_vulnerabilidades,
             
-            -- Cumulative metrics by department and segment
-            SUM(personas_unicas) OVER (
-              PARTITION BY departamento, segmento_demografico
-              ORDER BY periodo_mes
+            -- Cumulative metrics
+            SUM(m.personas_unicas) OVER (
+              PARTITION BY m.departamento, m.segmento_demografico
+              ORDER BY m.periodo_mes
               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
             ) AS acumulado_personas_dept_segmento,
             
             -- Month-over-month growth
-            LAG(personas_unicas) OVER (
-              PARTITION BY departamento, segmento_demografico
-              ORDER BY periodo_mes
+            LAG(m.personas_unicas) OVER (
+              PARTITION BY m.departamento, m.segmento_demografico
+              ORDER BY m.periodo_mes
             ) AS mes_anterior_personas,
             
             ROUND(SAFE_DIVIDE(
-              personas_unicas - LAG(personas_unicas) OVER (
-                PARTITION BY departamento, segmento_demografico
-                ORDER BY periodo_mes
+              m.personas_unicas - LAG(m.personas_unicas) OVER (
+                PARTITION BY m.departamento, m.segmento_demografico
+                ORDER BY m.periodo_mes
               ),
-              LAG(personas_unicas) OVER (
-                PARTITION BY departamento, segmento_demografico
-                ORDER BY periodo_mes
+              LAG(m.personas_unicas) OVER (
+                PARTITION BY m.departamento, m.segmento_demografico
+                ORDER BY m.periodo_mes
               )
             ) * 100, 2) AS crecimiento_mom_pct,
             
             -- Year-over-year comparison
-            LAG(personas_unicas, 12) OVER (
-              PARTITION BY departamento, segmento_demografico
-              ORDER BY periodo_mes
+            LAG(m.personas_unicas, 12) OVER (
+              PARTITION BY m.departamento, m.segmento_demografico
+              ORDER BY m.periodo_mes
             ) AS mismo_mes_anio_anterior,
             
             ROUND(SAFE_DIVIDE(
-              personas_unicas - LAG(personas_unicas, 12) OVER (
-                PARTITION BY departamento, segmento_demografico
-                ORDER BY periodo_mes
+              m.personas_unicas - LAG(m.personas_unicas, 12) OVER (
+                PARTITION BY m.departamento, m.segmento_demografico
+                ORDER BY m.periodo_mes
               ),
-              LAG(personas_unicas, 12) OVER (
-                PARTITION BY departamento, segmento_demografico
-                ORDER BY periodo_mes
+              LAG(m.personas_unicas, 12) OVER (
+                PARTITION BY m.departamento, m.segmento_demografico
+                ORDER BY m.periodo_mes
               )
             ) * 100, 2) AS crecimiento_yoy_pct,
             
             -- 3-month moving average
-            AVG(personas_unicas) OVER (
-              PARTITION BY departamento, segmento_demografico
-              ORDER BY periodo_mes
+            AVG(m.personas_unicas) OVER (
+              PARTITION BY m.departamento, m.segmento_demografico
+              ORDER BY m.periodo_mes
               ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
             ) AS promedio_movil_3_meses,
             
             CURRENT_TIMESTAMP() AS mart_refreshed_at
             
-          FROM monthly_demographics;
+          FROM monthly_demographics m
+          LEFT JOIN additional_stats s
+            ON m.periodo_mes = s.periodo_mes
+            AND m.departamento = s.departamento
+            AND IFNULL(m.ciudad, '') = IFNULL(s.ciudad, '')
+            AND m.segmento_demografico = s.segmento_demografico
+            AND m.grupo_edad_estandar = s.grupo_edad_estandar
+            AND IFNULL(m.sexo, '') = IFNULL(s.sexo, '');
     else:
       - id: refresh_demographics_incremental
         type: io.kestra.plugin.gcp.bigquery.Query
         sql: |
-          -- Monthly incremental refresh: update or insert data for the specified month
-          MERGE `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_demographics) }}` AS target
-          USING (
-            WITH demographic_base AS (
-              SELECT
-                DATE_TRUNC(DATE(fechaejecucion_orientacion), MONTH) AS periodo_mes,
-                EXTRACT(YEAR FROM fechaejecucion_orientacion) AS year,
-                EXTRACT(MONTH FROM fechaejecucion_orientacion) AS month,
-                EXTRACT(QUARTER FROM fechaejecucion_orientacion) AS quarter,
-                FORMAT_DATE('%B', fechaejecucion_orientacion) AS month_name,
-                FORMAT_DATE('%Y-%m', fechaejecucion_orientacion) AS year_month,
-                departamento,
-                ciudad,
-                numerodocumento,
-                edad,
-                rango_de_edad,
-                sexo,
-                grupos_etnicos,
-                vca,
-                discapacidad,
-                migrante,
-                vvg,
-                reincorporados,
-                condiciones_especiales,
-                CASE WHEN fechaejecucion_taller IS NOT NULL THEN 1 ELSE 0 END AS asistio_taller
-              FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_operations) }}.{{ render(vars.base_table) }}`
-              WHERE fechaejecucion_orientacion IS NOT NULL
-                AND DATE(fechaejecucion_orientacion) >= DATE('{{ render(vars.start_date) }}')
-                AND DATE(fechaejecucion_orientacion) < {{ render(vars.end_date) }}
-            ),
-            
-            demographic_segments AS (
-              SELECT
-                *,
-                CASE
-                  WHEN grupos_etnicos IS NOT NULL AND grupos_etnicos != '' THEN 'Grupos Étnicos'
-                  WHEN vca IS NOT NULL AND vca != '' THEN 'VCA (Víctimas Conflicto)'
-                  WHEN discapacidad IS NOT NULL AND discapacidad != '' THEN 'Personas con Discapacidad'
-                  WHEN migrante IS NOT NULL AND migrante != '' THEN 'Migrantes'
-                  WHEN vvg IS NOT NULL AND vvg != '' THEN 'VVG (Víctimas Violencia)'
-                  WHEN reincorporados IS NOT NULL AND reincorporados != '' THEN 'Reincorporados'
-                  ELSE 'Población General'
-                END AS segmento_demografico,
-                CASE
-                  WHEN edad < 18 THEN 'Menor de 18'
-                  WHEN edad BETWEEN 18 AND 28 THEN '18-28'
-                  WHEN edad BETWEEN 29 AND 39 THEN '29-39'
-                  WHEN edad BETWEEN 40 AND 49 THEN '40-49'
-                  WHEN edad BETWEEN 50 AND 59 THEN '50-59'
-                  WHEN edad > 60 THEN 'Más de 60'
-                  ELSE 'Desconocido'
-                END AS grupo_edad_estandar
-              FROM demographic_base
-            ),
-            
-            monthly_demographics AS (
-              SELECT
-                periodo_mes,
-                year,
-                month,
-                quarter,
-                month_name,
-                year_month,
-                departamento,
-                ciudad,
-                segmento_demografico,
-                grupo_edad_estandar,
-                sexo,
-                COUNT(DISTINCT numerodocumento) AS personas_unicas,
-                COUNT(*) AS total_orientaciones,
-                SUM(asistio_taller) AS personas_con_taller,
-                ROUND(SAFE_DIVIDE(SUM(asistio_taller), COUNT(DISTINCT numerodocumento)) * 100, 2) AS tasa_conversion_taller_pct,
-                ROUND(AVG(edad), 1) AS edad_promedio,
-                MIN(edad) AS edad_minima,
-                MAX(edad) AS edad_maxima,
-                COUNTIF(sexo = 'M') AS hombres,
-                COUNTIF(sexo = 'F') AS mujeres,
-                COUNTIF(sexo NOT IN ('M', 'F') OR sexo IS NULL) AS sexo_no_especificado,
-                COUNTIF(grupos_etnicos IS NOT NULL AND grupos_etnicos != '') AS con_grupo_etnico,
-                COUNTIF(vca = 'Sí') AS victimas_conflicto,
-                COUNTIF(discapacidad = 'Sí') AS con_discapacidad,
-                COUNTIF(migrante = 'Sí') AS migrantes,
-                COUNTIF(vvg = 'Sí') AS victimas_violencia_genero,
-                COUNTIF(reincorporados = 'Sí') AS reincorporados,
-                COUNTIF(
-                  (CASE WHEN grupos_etnicos IS NOT NULL AND grupos_etnicos != '' THEN 1 ELSE 0 END) +
-                  (CASE WHEN vca = 'Sí' THEN 1 ELSE 0 END) +
-                  (CASE WHEN discapacidad = 'Sí' THEN 1 ELSE 0 END) +
-                  (CASE WHEN migrante = 'Sí' THEN 1 ELSE 0 END) +
-                  (CASE WHEN vvg = 'Sí' THEN 1 ELSE 0 END) +
-                  (CASE WHEN reincorporados = 'Sí' THEN 1 ELSE 0 END) > 1
-                ) AS con_multiples_vulnerabilidades
-              FROM demographic_segments
-              GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
-            )
-            
+          -- Incremental refresh: This is complex because we need to update records
+          -- for BOTH the orientation period AND the workshop period
+          -- For simplicity in incremental mode, we'll delete and re-insert affected periods
+          
+          -- First, delete records for the target month
+          DELETE FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_demographics) }}`
+          WHERE periodo_mes = DATE_TRUNC(DATE('{{ render(vars.start_date) }}'), MONTH);
+          
+          -- Then insert fresh data for this month using the same logic as full refresh
+          INSERT INTO `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_demographics) }}`
+          WITH base_data AS (
             SELECT
-              periodo_mes,
-              year,
-              month,
-              quarter,
-              month_name,
-              year_month,
+              numerodocumento,
+              departamento,
+              ciudad,
+              edad,
+              rango_de_edad,
+              sexo,
+              grupos_etnicos,
+              vca,
+              discapacidad,
+              migrante,
+              vvg,
+              reincorporados,
+              condiciones_especiales,
+              fechaejecucion_orientacion,
+              fechaejecucion_taller,
+              anio_taller,
+              mes_taller,
+              
+              CASE
+                WHEN grupos_etnicos IS NOT NULL AND grupos_etnicos != '' THEN 'Grupos Étnicos'
+                WHEN vca IS NOT NULL AND vca != '' THEN 'VCA (Víctimas Conflicto)'
+                WHEN discapacidad IS NOT NULL AND discapacidad != '' THEN 'Personas con Discapacidad'
+                WHEN migrante IS NOT NULL AND migrante != '' THEN 'Migrantes'
+                WHEN vvg IS NOT NULL AND vvg != '' THEN 'VVG (Víctimas Violencia)'
+                WHEN reincorporados IS NOT NULL AND reincorporados != '' THEN 'Reincorporados'
+                ELSE 'Población General'
+              END AS segmento_demografico,
+              
+              CASE
+                WHEN edad < 18 THEN 'Menor de 18'
+                WHEN edad BETWEEN 18 AND 28 THEN '18-28'
+                WHEN edad BETWEEN 29 AND 39 THEN '29-39'
+                WHEN edad BETWEEN 40 AND 49 THEN '40-49'
+                WHEN edad BETWEEN 50 AND 59 THEN '50-59'
+                WHEN edad > 60 THEN 'Más de 60'
+                ELSE 'Desconocido'
+              END AS grupo_edad_estandar
+              
+            FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_operations) }}.{{ render(vars.base_table) }}`
+            WHERE (
+              -- Include records where orientation happened in target month
+              (fechaejecucion_orientacion IS NOT NULL
+                AND DATE_TRUNC(DATE(fechaejecucion_orientacion), MONTH) = DATE_TRUNC(DATE('{{ render(vars.start_date) }}'), MONTH))
+              OR
+              -- Include records where workshop happened in target month
+              (fechaejecucion_taller IS NOT NULL
+                AND DATE_TRUNC(DATE(fechaejecucion_taller), MONTH) = DATE_TRUNC(DATE('{{ render(vars.start_date) }}'), MONTH))
+            )
+          ),
+          
+          orientations_by_month AS (
+            SELECT
+              DATE_TRUNC(DATE(fechaejecucion_orientacion), MONTH) AS periodo_mes,
               departamento,
               ciudad,
               segmento_demografico,
               grupo_edad_estandar,
               sexo,
-              personas_unicas,
-              total_orientaciones,
-              personas_con_taller,
-              tasa_conversion_taller_pct,
-              edad_promedio,
-              edad_minima,
-              edad_maxima,
-              hombres,
-              mujeres,
-              sexo_no_especificado,
-              ROUND(SAFE_DIVIDE(hombres, personas_unicas) * 100, 2) AS pct_hombres,
-              ROUND(SAFE_DIVIDE(mujeres, personas_unicas) * 100, 2) AS pct_mujeres,
-              con_grupo_etnico,
-              victimas_conflicto,
-              con_discapacidad,
-              migrantes,
-              victimas_violencia_genero,
-              reincorporados,
-              con_multiples_vulnerabilidades,
-              ROUND(SAFE_DIVIDE(con_grupo_etnico, personas_unicas) * 100, 2) AS pct_grupo_etnico,
-              ROUND(SAFE_DIVIDE(victimas_conflicto, personas_unicas) * 100, 2) AS pct_vca,
-              ROUND(SAFE_DIVIDE(con_discapacidad, personas_unicas) * 100, 2) AS pct_discapacidad,
-              ROUND(SAFE_DIVIDE(migrantes, personas_unicas) * 100, 2) AS pct_migrante,
-              ROUND(SAFE_DIVIDE(victimas_violencia_genero, personas_unicas) * 100, 2) AS pct_vvg,
-              ROUND(SAFE_DIVIDE(reincorporados, personas_unicas) * 100, 2) AS pct_reincorporados,
-              ROUND(SAFE_DIVIDE(con_multiples_vulnerabilidades, personas_unicas) * 100, 2) AS pct_multiples_vulnerabilidades,
-              NULL AS acumulado_personas_dept_segmento,
-              NULL AS mes_anterior_personas,
-              NULL AS crecimiento_mom_pct,
-              NULL AS mismo_mes_anio_anterior,
-              NULL AS crecimiento_yoy_pct,
-              NULL AS promedio_movil_3_meses,
-              CURRENT_TIMESTAMP() AS mart_refreshed_at
-            FROM monthly_demographics
-          ) AS source
-          ON target.periodo_mes = source.periodo_mes
-            AND target.departamento = source.departamento
-            AND IFNULL(target.ciudad, '') = IFNULL(source.ciudad, '')
-            AND IFNULL(target.segmento_demografico, '') = IFNULL(source.segmento_demografico, '')
-            AND IFNULL(target.grupo_edad_estandar, '') = IFNULL(source.grupo_edad_estandar, '')
-            AND IFNULL(target.sexo, '') = IFNULL(source.sexo, '')
+              numerodocumento
+            FROM base_data
+            WHERE fechaejecucion_orientacion IS NOT NULL
+              AND DATE_TRUNC(DATE(fechaejecucion_orientacion), MONTH) = DATE_TRUNC(DATE('{{ render(vars.start_date) }}'), MONTH)
+          ),
           
-          WHEN MATCHED THEN
-            UPDATE SET
-              personas_unicas = source.personas_unicas,
-              total_orientaciones = source.total_orientaciones,
-              personas_con_taller = source.personas_con_taller,
-              tasa_conversion_taller_pct = source.tasa_conversion_taller_pct,
-              edad_promedio = source.edad_promedio,
-              edad_minima = source.edad_minima,
-              edad_maxima = source.edad_maxima,
-              hombres = source.hombres,
-              mujeres = source.mujeres,
-              sexo_no_especificado = source.sexo_no_especificado,
-              pct_hombres = source.pct_hombres,
-              pct_mujeres = source.pct_mujeres,
-              con_grupo_etnico = source.con_grupo_etnico,
-              victimas_conflicto = source.victimas_conflicto,
-              con_discapacidad = source.con_discapacidad,
-              migrantes = source.migrantes,
-              victimas_violencia_genero = source.victimas_violencia_genero,
-              reincorporados = source.reincorporados,
-              con_multiples_vulnerabilidades = source.con_multiples_vulnerabilidades,
-              pct_grupo_etnico = source.pct_grupo_etnico,
-              pct_vca = source.pct_vca,
-              pct_discapacidad = source.pct_discapacidad,
-              pct_migrante = source.pct_migrante,
-              pct_vvg = source.pct_vvg,
-              pct_reincorporados = source.pct_reincorporados,
-              pct_multiples_vulnerabilidades = source.pct_multiples_vulnerabilidades,
-              mart_refreshed_at = source.mart_refreshed_at
+          workshops_by_month AS (
+            SELECT
+              DATE_TRUNC(DATE(fechaejecucion_taller), MONTH) AS periodo_mes,
+              departamento,
+              ciudad,
+              segmento_demografico,
+              grupo_edad_estandar,
+              sexo,
+              numerodocumento
+            FROM base_data
+            WHERE fechaejecucion_taller IS NOT NULL
+              AND DATE_TRUNC(DATE(fechaejecucion_taller), MONTH) = DATE_TRUNC(DATE('{{ render(vars.start_date) }}'), MONTH)
+          ),
           
-          WHEN NOT MATCHED THEN
-            INSERT ROW;
+          all_periods AS (
+            SELECT DISTINCT periodo_mes, departamento, ciudad, segmento_demografico, grupo_edad_estandar, sexo
+            FROM orientations_by_month
+            UNION DISTINCT
+            SELECT DISTINCT periodo_mes, departamento, ciudad, segmento_demografico, grupo_edad_estandar, sexo
+            FROM workshops_by_month
+          ),
+          
+          orientation_metrics AS (
+            SELECT
+              periodo_mes,
+              departamento,
+              ciudad,
+              segmento_demografico,
+              grupo_edad_estandar,
+              sexo,
+              COUNT(DISTINCT numerodocumento) AS personas_unicas_con_orientacion
+            FROM orientations_by_month
+            GROUP BY 1, 2, 3, 4, 5, 6
+          ),
+          
+          workshop_metrics AS (
+            SELECT
+              periodo_mes,
+              departamento,
+              ciudad,
+              segmento_demografico,
+              grupo_edad_estandar,
+              sexo,
+              COUNT(DISTINCT numerodocumento) AS personas_unicas_con_taller
+            FROM workshops_by_month
+            GROUP BY 1, 2, 3, 4, 5, 6
+          ),
+          
+          monthly_demographics AS (
+            SELECT
+              p.periodo_mes,
+              EXTRACT(YEAR FROM p.periodo_mes) AS year,
+              EXTRACT(MONTH FROM p.periodo_mes) AS month,
+              EXTRACT(QUARTER FROM p.periodo_mes) AS quarter,
+              FORMAT_DATE('%B', p.periodo_mes) AS month_name,
+              FORMAT_DATE('%Y-%m', p.periodo_mes) AS year_month,
+              p.departamento,
+              p.ciudad,
+              p.segmento_demografico,
+              p.grupo_edad_estandar,
+              p.sexo,
+              
+              COALESCE(o.personas_unicas_con_orientacion, 0) AS personas_unicas_con_orientacion,
+              COALESCE(w.personas_unicas_con_taller, 0) AS personas_unicas_con_taller,
+              
+              GREATEST(
+                COALESCE(o.personas_unicas_con_orientacion, 0),
+                COALESCE(w.personas_unicas_con_taller, 0)
+              ) AS personas_unicas
+              
+            FROM all_periods p
+            LEFT JOIN orientation_metrics o
+              ON p.periodo_mes = o.periodo_mes
+              AND p.departamento = o.departamento
+              AND IFNULL(p.ciudad, '') = IFNULL(o.ciudad, '')
+              AND p.segmento_demografico = o.segmento_demografico
+              AND p.grupo_edad_estandar = o.grupo_edad_estandar
+              AND IFNULL(p.sexo, '') = IFNULL(o.sexo, '')
+            LEFT JOIN workshop_metrics w
+              ON p.periodo_mes = w.periodo_mes
+              AND p.departamento = w.departamento
+              AND IFNULL(p.ciudad, '') = IFNULL(w.ciudad, '')
+              AND p.segmento_demografico = w.segmento_demografico
+              AND p.grupo_edad_estandar = w.grupo_edad_estandar
+              AND IFNULL(p.sexo, '') = IFNULL(w.sexo, '')
+          ),
+          
+          additional_stats AS (
+            SELECT
+              DATE_TRUNC(DATE(fechaejecucion_orientacion), MONTH) AS periodo_mes,
+              departamento,
+              ciudad,
+              segmento_demografico,
+              grupo_edad_estandar,
+              sexo,
+              
+              COUNT(*) AS total_orientaciones,
+              SUM(CASE WHEN fechaejecucion_taller IS NOT NULL THEN 1 ELSE 0 END) AS personas_con_taller,
+              
+              COUNT(DISTINCT CASE 
+                WHEN anio_taller = EXTRACT(YEAR FROM DATE_TRUNC(DATE(fechaejecucion_orientacion), MONTH))
+                  AND mes_taller = EXTRACT(MONTH FROM DATE_TRUNC(DATE(fechaejecucion_orientacion), MONTH))
+                THEN numerodocumento 
+              END) AS personas_taller_en_periodo,
+              
+              COUNTIF(
+                anio_taller = EXTRACT(YEAR FROM DATE_TRUNC(DATE(fechaejecucion_orientacion), MONTH))
+                AND mes_taller = EXTRACT(MONTH FROM DATE_TRUNC(DATE(fechaejecucion_orientacion), MONTH))
+                AND sexo = 'M'
+              ) AS hombres_taller_en_periodo,
+              
+              COUNTIF(
+                anio_taller = EXTRACT(YEAR FROM DATE_TRUNC(DATE(fechaejecucion_orientacion), MONTH))
+                AND mes_taller = EXTRACT(MONTH FROM DATE_TRUNC(DATE(fechaejecucion_orientacion), MONTH))
+                AND sexo = 'F'
+              ) AS mujeres_taller_en_periodo,
+              
+              ROUND(SAFE_DIVIDE(
+                SUM(CASE WHEN fechaejecucion_taller IS NOT NULL THEN 1 ELSE 0 END),
+                COUNT(DISTINCT numerodocumento)
+              ) * 100, 2) AS tasa_conversion_taller_pct,
+              
+              ROUND(AVG(edad), 1) AS edad_promedio,
+              MIN(edad) AS edad_minima,
+              MAX(edad) AS edad_maxima,
+              
+              COUNTIF(sexo = 'M') AS hombres,
+              COUNTIF(sexo = 'F') AS mujeres,
+              COUNTIF(sexo NOT IN ('M', 'F') OR sexo IS NULL) AS sexo_no_especificado,
+              
+              COUNTIF(grupos_etnicos IS NOT NULL AND grupos_etnicos != '') AS con_grupo_etnico,
+              COUNTIF(vca = 'Sí') AS victimas_conflicto,
+              COUNTIF(discapacidad = 'Sí') AS con_discapacidad,
+              COUNTIF(migrante = 'Sí') AS migrantes,
+              COUNTIF(vvg = 'Sí') AS victimas_violencia_genero,
+              COUNTIF(reincorporados = 'Sí') AS reincorporados,
+              
+              COUNTIF(
+                (CASE WHEN grupos_etnicos IS NOT NULL AND grupos_etnicos != '' THEN 1 ELSE 0 END) +
+                (CASE WHEN vca = 'Sí' THEN 1 ELSE 0 END) +
+                (CASE WHEN discapacidad = 'Sí' THEN 1 ELSE 0 END) +
+                (CASE WHEN migrante = 'Sí' THEN 1 ELSE 0 END) +
+                (CASE WHEN vvg = 'Sí' THEN 1 ELSE 0 END) +
+                (CASE WHEN reincorporados = 'Sí' THEN 1 ELSE 0 END) > 1
+              ) AS con_multiples_vulnerabilidades
+              
+            FROM base_data
+            WHERE fechaejecucion_orientacion IS NOT NULL
+              AND DATE_TRUNC(DATE(fechaejecucion_orientacion), MONTH) = DATE_TRUNC(DATE('{{ render(vars.start_date) }}'), MONTH)
+            GROUP BY 1, 2, 3, 4, 5, 6
+          )
+          
+          SELECT
+            m.periodo_mes,
+            m.year,
+            m.month,
+            m.quarter,
+            m.month_name,
+            m.year_month,
+            m.departamento,
+            m.ciudad,
+            m.segmento_demografico,
+            m.grupo_edad_estandar,
+            m.sexo,
+            m.personas_unicas,
+            m.personas_unicas_con_orientacion,
+            m.personas_unicas_con_taller,
+            COALESCE(s.total_orientaciones, 0) AS total_orientaciones,
+            COALESCE(s.personas_con_taller, 0) AS personas_con_taller,
+            COALESCE(s.personas_taller_en_periodo, 0) AS personas_taller_en_periodo,
+            COALESCE(s.hombres_taller_en_periodo, 0) AS hombres_taller_en_periodo,
+            COALESCE(s.mujeres_taller_en_periodo, 0) AS mujeres_taller_en_periodo,
+            COALESCE(s.tasa_conversion_taller_pct, 0) AS tasa_conversion_taller_pct,
+            s.edad_promedio,
+            s.edad_minima,
+            s.edad_maxima,
+            COALESCE(s.hombres, 0) AS hombres,
+            COALESCE(s.mujeres, 0) AS mujeres,
+            COALESCE(s.sexo_no_especificado, 0) AS sexo_no_especificado,
+            ROUND(SAFE_DIVIDE(s.hombres, m.personas_unicas) * 100, 2) AS pct_hombres,
+            ROUND(SAFE_DIVIDE(s.mujeres, m.personas_unicas) * 100, 2) AS pct_mujeres,
+            COALESCE(s.con_grupo_etnico, 0) AS con_grupo_etnico,
+            COALESCE(s.victimas_conflicto, 0) AS victimas_conflicto,
+            COALESCE(s.con_discapacidad, 0) AS con_discapacidad,
+            COALESCE(s.migrantes, 0) AS migrantes,
+            COALESCE(s.victimas_violencia_genero, 0) AS victimas_violencia_genero,
+            COALESCE(s.reincorporados, 0) AS reincorporados,
+            COALESCE(s.con_multiples_vulnerabilidades, 0) AS con_multiples_vulnerabilidades,
+            ROUND(SAFE_DIVIDE(s.con_grupo_etnico, m.personas_unicas) * 100, 2) AS pct_grupo_etnico,
+            ROUND(SAFE_DIVIDE(s.victimas_conflicto, m.personas_unicas) * 100, 2) AS pct_vca,
+            ROUND(SAFE_DIVIDE(s.con_discapacidad, m.personas_unicas) * 100, 2) AS pct_discapacidad,
+            ROUND(SAFE_DIVIDE(s.migrantes, m.personas_unicas) * 100, 2) AS pct_migrante,
+            ROUND(SAFE_DIVIDE(s.victimas_violencia_genero, m.personas_unicas) * 100, 2) AS pct_vvg,
+            ROUND(SAFE_DIVIDE(s.reincorporados, m.personas_unicas) * 100, 2) AS pct_reincorporados,
+            ROUND(SAFE_DIVIDE(s.con_multiples_vulnerabilidades, m.personas_unicas) * 100, 2) AS pct_multiples_vulnerabilidades,
+            NULL AS acumulado_personas_dept_segmento,
+            NULL AS mes_anterior_personas,
+            NULL AS crecimiento_mom_pct,
+            NULL AS mismo_mes_anio_anterior,
+            NULL AS crecimiento_yoy_pct,
+            NULL AS promedio_movil_3_meses,
+            CURRENT_TIMESTAMP() AS mart_refreshed_at
+            
+          FROM monthly_demographics m
+          LEFT JOIN additional_stats s
+            ON m.periodo_mes = s.periodo_mes
+            AND m.departamento = s.departamento
+            AND IFNULL(m.ciudad, '') = IFNULL(s.ciudad, '')
+            AND m.segmento_demografico = s.segmento_demografico
+            AND m.grupo_edad_estandar = s.grupo_edad_estandar
+            AND IFNULL(m.sexo, '') = IFNULL(s.sexo, '');
 
       - id: recalculate_demographics_window_functions
         type: io.kestra.plugin.gcp.bigquery.Query
@@ -974,14 +1192,12 @@ tasks:
                      crecimiento_mom_pct, mismo_mes_anio_anterior, crecimiento_yoy_pct, 
                      promedio_movil_3_meses),
             
-            -- Recalculate cumulative totals
             SUM(personas_unicas) OVER (
               PARTITION BY departamento, segmento_demografico
               ORDER BY periodo_mes
               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
             ) AS acumulado_personas_dept_segmento,
             
-            -- Month-over-month growth
             LAG(personas_unicas) OVER (
               PARTITION BY departamento, segmento_demografico
               ORDER BY periodo_mes
@@ -998,7 +1214,6 @@ tasks:
               )
             ) * 100, 2) AS crecimiento_mom_pct,
             
-            -- Year-over-year comparison
             LAG(personas_unicas, 12) OVER (
               PARTITION BY departamento, segmento_demografico
               ORDER BY periodo_mes
@@ -1015,7 +1230,6 @@ tasks:
               )
             ) * 100, 2) AS crecimiento_yoy_pct,
             
-            -- 3-month moving average
             AVG(personas_unicas) OVER (
               PARTITION BY departamento, segmento_demografico
               ORDER BY periodo_mes
@@ -1187,6 +1401,8 @@ tasks:
         year_month,
         segmento_demografico,
         SUM(personas_unicas) AS total_personas,
+        SUM(personas_unicas_con_orientacion) AS con_orientacion,
+        SUM(personas_unicas_con_taller) AS con_taller,
         ROUND(AVG(edad_promedio), 1) AS edad_promedio,
         ROUND(AVG(pct_hombres), 2) AS pct_hombres,
         ROUND(AVG(pct_mujeres), 2) AS pct_mujeres,
@@ -1279,6 +1495,9 @@ tasks:
         <li>✅ Month-over-month (MoM) and year-over-year (YoY) trends</li>
         <li>✅ 3-month moving averages</li>
         <li>✅ Equity analysis metrics</li>
+        <li>✅ <strong>CRITICAL:</strong> personas_unicas_con_orientacion counts people whose fechaejecucion_orientacion falls in the period</li>
+        <li>✅ <strong>CRITICAL:</strong> personas_unicas_con_taller counts people whose fechaejecucion_taller falls in the period</li>
+        <li>✅ These can differ - same person can be oriented in January but attend workshop in March</li>
       </ul>
       
       <h3>Sample Queries</h3>
@@ -1302,9 +1521,13 @@ tasks:
       <h4>Demographics Analysis - Vulnerable Populations</h4>
       <pre style="background: #f5f5f5; padding: 10px; border-radius: 5px;">
       -- Vulnerable population reach and conversion
+      -- IMPORTANT: personas_unicas_con_orientacion and personas_unicas_con_taller 
+      -- are counted based on different date fields and can be in different months!
       SELECT 
         segmento_demografico,
         SUM(personas_unicas) as total_personas,
+        SUM(personas_unicas_con_orientacion) as orientados_en_periodo,
+        SUM(personas_unicas_con_taller) as taller_en_periodo,
         ROUND(AVG(edad_promedio), 1) as edad_promedio,
         ROUND(AVG(pct_hombres), 2) as pct_hombres,
         ROUND(AVG(pct_mujeres), 2) as pct_mujeres,
