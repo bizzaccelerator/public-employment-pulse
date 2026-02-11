@@ -17,8 +17,8 @@ inputs:
     type: SELECT
     description: Year of data to process
     displayName: "Choose the year of interest."
-    defaults: "2025"
-    values: [ "2024", "2025" ]
+    defaults: "2026"
+    values: [ "2024", "2025", "2026" ]
 
   - id: month_of_interest
     type: INT
@@ -292,7 +292,7 @@ tasks:
           
           INSERT INTO `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}` (
             fact_id, unique_row_id, cedula, fecha_accion, year, month, quarter, week, day_of_week,
-            nombre_completo, edad, rango_edad, sexo, estado_civil,
+            nombre_completo, edad, rango_edad, rango_etareo, sexo, estado_civil,
             nivel_educativo, categoria_educativa, titulo_obtenido,
             ciudad, departamento, barrio, direccion, geografia_id,
             telefono, correo_electronico,
@@ -511,7 +511,7 @@ tasks:
           
           INSERT INTO `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.agg_table) }}`
           (
-            year, month, departamento, categoria_educativa, rango_edad, rango_etareo, rango_etareo, sexo, tipo_canal_registro, es_poblacion_vulnerable,
+            year, month, departamento, categoria_educativa, rango_edad, rango_etareo, sexo, tipo_canal_registro, es_poblacion_vulnerable,
             total_registros, total_discapacidad, total_victima_conflicto, total_victima_violencia_genero,
             total_migrante, total_etnia, total_reincorporado, total_cabeza_familia,
             promedio_edad, promedio_experiencia, promedio_aspiracion_salarial, registro_mas_reciente,

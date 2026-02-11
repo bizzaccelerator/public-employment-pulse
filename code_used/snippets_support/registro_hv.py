@@ -9,7 +9,7 @@ prev_month = int(os.getenv('MONTH'))
 prev_year = int(os.getenv('YEAR'))
 
 # data handling
-registro = pd.read_excel('excel_file',sheet_name='BD_Acumulado-2024-2025')
+registro = pd.read_excel('excel_file',sheet_name='BD_Acumulado-2024-2026')
 
 registro.columns = registro.columns.str.lower()
 registro.columns = registro.columns.str.replace(" ","_")
