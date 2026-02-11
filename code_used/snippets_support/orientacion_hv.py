@@ -9,7 +9,7 @@ prev_year = int(os.getenv('YEAR'))
 
 # reading the raw data
 orientados = pd.read_excel('sise_psico', sheet_name='BD_Indicador_1')
-registrados = pd.read_excel('registries',sheet_name='BD_Acumulado-2024-2025')
+registrados = pd.read_excel('registries',sheet_name='BD_Acumulado-2024-2026')
 psicologas = pd.read_excel('psicologist', sheet_name='Orientados')
 talleres = pd.read_excel('sise_psico', sheet_name='Reporte_Indicador_2')
 
