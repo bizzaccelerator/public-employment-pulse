@@ -74,7 +74,7 @@ df['nivel_educativo'] = df['nivel_educativo'].replace(dictionary)
 
 # Cleaning column 'edad': 
 df['edad'] = df['edad'].fillna(0)
-df['edad'] = df['edad'].apply(lambda x:int(x) if str(x).isdigit() else np.nan)
+df['edad'] = (pd.to_numeric(df['edad'], errors='coerce').round(0).astype('Int64'))
 
 def range_age(age):
     if  0 < age < 18:
