@@ -13,8 +13,8 @@ inputs:
     type: SELECT
     description: Year of data to process.
     displayName: "Choose the year of interest."
-    defaults: "2025"
-    values: [ "2024", "2025" ]
+    defaults: "2026"
+    values: [ "2024", "2025", "2026" ]
 
   - id: month_of_interest
     type: INT
