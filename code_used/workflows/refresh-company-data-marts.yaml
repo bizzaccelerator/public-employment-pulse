@@ -16,8 +16,8 @@ inputs:
     type: SELECT
     description: Year of data to refresh
     displayName: "Choose the year of interest."
-    defaults: "2025"
-    values: [ "2024", "2025" ]
+    defaults: "2026"
+    values: [ "2024", "2025", "2026" ]
 
   - id: month_of_interest
     type: INT
@@ -297,12 +297,12 @@ tasks:
               auto_registrations,
               agency_registrations,
               avg_data_quality_score,
-              NULL AS cumulative_companies_by_dept,
-              NULL AS prev_month_companies,
-              NULL AS mom_growth_pct,
-              NULL AS same_month_last_year,
-              NULL AS yoy_growth_pct,
-              NULL AS three_month_moving_avg,
+              CAST(NULL AS INT64) AS cumulative_companies_by_dept,
+              CAST(NULL AS INT64) AS prev_month_companies,
+              CAST(NULL AS FLOAT64) AS mom_growth_pct,
+              CAST(NULL AS INT64) AS same_month_last_year,
+              CAST(NULL AS FLOAT64) AS yoy_growth_pct,
+              CAST(NULL AS FLOAT64) AS three_month_moving_avg,
               CURRENT_TIMESTAMP() AS mart_refreshed_at
               
             FROM monthly_registrations
@@ -337,7 +337,82 @@ tasks:
               mart_refreshed_at = source.mart_refreshed_at
           
           WHEN NOT MATCHED THEN
-            INSERT ROW;
+            INSERT (
+              registration_month,
+              year,
+              month,
+              quarter,
+              month_name,
+              year_month,
+              departamento,
+              ciudad,
+              sector,
+              actividad_economica,
+              tamanio,
+              canal_de_registro,
+              naturaleza,
+              total_registrations,
+              unique_companies,
+              companies_with_phone,
+              companies_with_email,
+              companies_with_address,
+              pct_with_phone,
+              pct_with_email,
+              pct_with_address,
+              micro_companies,
+              small_companies,
+              medium_companies,
+              large_companies,
+              unipersonal_companies,
+              auto_registrations,
+              agency_registrations,
+              avg_data_quality_score,
+              cumulative_companies_by_dept,
+              prev_month_companies,
+              mom_growth_pct,
+              same_month_last_year,
+              yoy_growth_pct,
+              three_month_moving_avg,
+              mart_refreshed_at
+            )
+            VALUES (
+              source.registration_month,
+              source.year,
+              source.month,
+              source.quarter,
+              source.month_name,
+              source.year_month,
+              source.departamento,
+              source.ciudad,
+              source.sector,
+              source.actividad_economica,
+              source.tamanio,
+              source.canal_de_registro,
+              source.naturaleza,
+              source.total_registrations,
+              source.unique_companies,
+              source.companies_with_phone,
+              source.companies_with_email,
+              source.companies_with_address,
+              source.pct_with_phone,
+              source.pct_with_email,
+              source.pct_with_address,
+              source.micro_companies,
+              source.small_companies,
+              source.medium_companies,
+              source.large_companies,
+              source.unipersonal_companies,
+              source.auto_registrations,
+              source.agency_registrations,
+              source.avg_data_quality_score,
+              source.cumulative_companies_by_dept,
+              source.prev_month_companies,
+              source.mom_growth_pct,
+              source.same_month_last_year,
+              source.yoy_growth_pct,
+              source.three_month_moving_avg,
+              source.mart_refreshed_at
+            );
 
       - id: recalculate_window_functions
         type: io.kestra.plugin.gcp.bigquery.Query
@@ -577,6 +652,7 @@ tasks:
         AND month = {{ inputs.month_of_interest }}
       GROUP BY 1
       ORDER BY 2 DESC;
+      </pre>
       
       <p>See attached files for detailed statistics, validation results, and recent trends.</p>
       
