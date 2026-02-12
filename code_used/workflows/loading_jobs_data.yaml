@@ -13,8 +13,8 @@ inputs:
     type: SELECT
     description: Year of data to process.
     displayName: "Choose the year of interest."
-    defaults: "2025"
-    values: [ "2024", "2025" ]
+    defaults: "2026"
+    values: [ "2024", "2025", "2026" ]
 
   - id: month_of_interest
     type: INT
@@ -32,7 +32,7 @@ variables:
 tasks:
   - id: download_registries_file
     type: io.kestra.plugin.gcp.gcs.Download
-    from: gs://operations-raw-data_public-employment-pulse/Vacantes_publicadas_2024-2025.xlsx
+    from: gs://operations-raw-data_public-employment-pulse/Vacantes_publicadas_2024-2025-2026.xlsx
 
   - id: reading_monthly_registries
     type: io.kestra.plugin.scripts.python.Commands
