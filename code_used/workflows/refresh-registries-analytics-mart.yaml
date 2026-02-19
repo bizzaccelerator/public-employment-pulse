@@ -1,0 +1,823 @@
+id: refresh-registro-hv-analytics-mart
+namespace: public_employment_pulse
+
+description: |
+  Transform job seeker CV registration data from operations_co.registro_hv to an analytics-ready fact table.
+  Provides monthly aggregations by educational level, age ranges, and vulnerability groups.
+  Supports both full refresh (recreate entire table) and incremental monthly updates.
+
+inputs:
+  - id: full_refresh
+    type: BOOLEAN
+    description: If true, recreates the data mart from scratch (use only when required)
+    displayName: "Full Refresh? (Manual Override)"
+    defaults: false
+
+  - id: year_of_interest
+    type: SELECT
+    description: Year of data to process
+    displayName: "Choose the year of interest."
+    defaults: "2026"
+    values: [ "2024", "2025", "2026" ]
+
+  - id: month_of_interest
+    type: INT
+    description: Month of data to process (1-12)
+    displayName: "Choose the month number of interest."
+    defaults: 1
+    min: 1
+    max: 12
+    
+variables:
+  source_dataset: "operations_co"
+  source_table: "registros"
+  project_id: "{{ kv('GCP_PROJECT_ID') }}"
+  dataset_id: "data_marts"
+  fact_table: "fact_registro_hv"
+  agg_table: "agg_registro_hv_monthly"
+  month_name: "{% set month_names = {1: 'january', 2: 'february', 3: 'march', 4: 'april', 5: 'may', 6: 'june', 7: 'july', 8: 'august', 9: 'september', 10: 'october', 11: 'november', 12: 'december'} %}{{ month_names[inputs.month_of_interest] }}"
+  month_padded: "{% if inputs.month_of_interest < 10 %}0{{ inputs.month_of_interest }}{% else %}{{ inputs.month_of_interest }}{% endif %}"
+  start_date: "{{ inputs.year_of_interest }}-{{ render(vars.month_padded) }}-01"
+  end_date: "DATE_ADD(DATE('{{ inputs.year_of_interest }}-{{ render(vars.month_padded) }}-01'), INTERVAL 1 MONTH)"
+
+tasks:
+  - id: log_start
+    type: io.kestra.plugin.core.log.Log
+    message: |
+      Starting Job Seeker Registration Analytics Data Mart Refresh
+      Mode: {{ inputs.full_refresh and 'Full Refresh (Manual)' or 'Monthly Incremental Refresh' }}
+      Period: {{ render(vars.month_name) | title }} {{ inputs.year_of_interest }}
+      Date Range: {{ render(vars.start_date) }} to {{ render(vars.end_date) }}
+      Source: {{ vars.project_id }}.{{ vars.source_dataset }}.{{ vars.source_table }}
+      Destination Fact: {{ vars.project_id }}.{{ vars.dataset_id }}.{{ vars.fact_table }}
+      Destination Agg: {{ vars.project_id }}.{{ vars.dataset_id }}.{{ vars.agg_table }}
+
+  - id: create_bigquery_dataset
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      CREATE SCHEMA IF NOT EXISTS `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}`
+      OPTIONS(
+        location='US',
+        description='Analytics-ready data marts for employment pulse data'
+      );
+
+  - id: refresh_fact_table
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{ inputs.full_refresh }}"
+    then:
+      - id: refresh_fact_full
+        type: io.kestra.plugin.gcp.bigquery.Query
+        sql: |
+          -- Full refresh: recreate entire fact table from all available data
+          CREATE OR REPLACE TABLE `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}`
+          PARTITION BY TIMESTAMP_TRUNC(fecha_accion, MONTH)
+          CLUSTER BY nivel_educativo, rango_edad, sexo
+          OPTIONS(
+            description='Fact table for job seeker CV registrations with full history - monthly partitions',
+            require_partition_filter=true,
+            labels=[("domain", "employment"), ("refresh_type", "full")]
+          )
+          AS
+          SELECT
+            unique_row_id as fact_id,
+            unique_row_id,
+            numero_documento as cedula,
+            
+            -- Date dimensions
+            fecha_accion,
+            EXTRACT(YEAR FROM fecha_accion) as year,
+            EXTRACT(MONTH FROM fecha_accion) as month,
+            EXTRACT(QUARTER FROM fecha_accion) as quarter,
+            EXTRACT(WEEK FROM fecha_accion) as week,
+            EXTRACT(DAYOFWEEK FROM fecha_accion) as day_of_week,
+            
+            -- Personal information
+            CONCAT(COALESCE(nombres, ''), ' ', COALESCE(apellidos, '')) as nombre_completo,
+            edad,
+            CASE 
+              WHEN edad < 18 THEN 'Menor de 18'
+              WHEN edad BETWEEN 18 AND 28 THEN '18-28'
+              WHEN edad BETWEEN 29 AND 39 THEN '29-39'
+              WHEN edad BETWEEN 40 AND 49 THEN '40-49'
+              WHEN edad BETWEEN 50 AND 59 THEN '50-59'
+              WHEN edad > 60 THEN 'Más de 60'
+              ELSE 'Desconocido'
+            END as rango_edad,
+            CASE 
+              WHEN edad < 18 THEN 'Menor de 18'
+              WHEN edad BETWEEN 18 AND 28 THEN '18-28'
+              WHEN edad BETWEEN 29 AND 59 THEN '29-59'
+              WHEN edad > 60 THEN 'Más de 60'
+              ELSE 'Desconocido'
+            END as rango_etareo,
+            genero as sexo,
+            CAST(NULL AS STRING) as estado_civil,
+            
+            -- Education
+            nivel_de_estudio as nivel_educativo,
+            CASE 
+              WHEN UPPER(nivel_de_estudio) LIKE '%PRIMARIA%' THEN 'Básica'
+              WHEN UPPER(nivel_de_estudio) LIKE '%SECUNDARIA%' OR UPPER(nivel_de_estudio) LIKE '%BACHILLER%' THEN 'Secundaria'
+              WHEN UPPER(nivel_de_estudio) LIKE '%TECNICO%' OR UPPER(nivel_de_estudio) LIKE '%TECNOLOG%' OR UPPER(nivel_de_estudio) LIKE '%TÉCNICO%' OR UPPER(nivel_de_estudio) LIKE '%TECNÓLOG%' THEN 'Técnico/Tecnológico'
+              WHEN UPPER(nivel_de_estudio) LIKE '%PROFESIONAL%' OR UPPER(nivel_de_estudio) LIKE '%UNIVERSITARIO%' THEN 'Profesional'
+              WHEN UPPER(nivel_de_estudio) LIKE '%POSGRADO%' OR UPPER(nivel_de_estudio) LIKE '%MAESTRIA%' OR UPPER(nivel_de_estudio) LIKE '%ESPECIALIZACION%' THEN 'Posgrado'
+              ELSE 'Otro'
+            END as categoria_educativa,
+            titulo_homologado as titulo_obtenido,
+            
+            -- Geographic information (extracting ciudad and departamento from ciudad_de_residencia)
+            ciudad_de_residencia as ciudad,
+            CAST(NULL AS STRING) as departamento,
+            barrio_donde_vive as barrio,
+            CAST(NULL AS STRING) as direccion,
+            TO_HEX(MD5(CONCAT(
+              'UNKNOWN',
+              '|',
+              COALESCE(ciudad_de_residencia, 'UNKNOWN')
+            ))) as geografia_id,
+            
+            -- Contact information
+            COALESCE(celular, telefono) as telefono,
+            email as correo_electronico,
+            
+            -- Vulnerability indicators (converting to boolean)
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(discapacidad, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno', 'no aplica') 
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_discapacidad,
+            discapacidad as tipo_discapacidad,
+            
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(vca, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno', 'no aplica') 
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_victima_conflicto,
+            
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(vvg, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno', 'no aplica') 
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_victima_violencia_genero,
+            
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(migrante, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno', 'no aplica') 
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_migrante,
+            migrante as tipo_migrante,
+            
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(grupos_etnicos, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno', 'no aplica', 'ninguna etnia') 
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_etnia,
+            grupos_etnicos as tipo_etnia,
+            
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(reincorporados, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno', 'no aplica') 
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_reincorporado,
+            
+            CAST(NULL AS BOOL) as es_cabeza_familia,
+            
+            -- Consolidated vulnerability flag
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(discapacidad, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno', 'no aplica')
+                OR LOWER(TRIM(COALESCE(vca, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno', 'no aplica')
+                OR LOWER(TRIM(COALESCE(vvg, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno', 'no aplica')
+                OR LOWER(TRIM(COALESCE(migrante, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno', 'no aplica')
+                OR LOWER(TRIM(COALESCE(grupos_etnicos, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno', 'no aplica', 'ninguna etnia')
+                OR LOWER(TRIM(COALESCE(reincorporados, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno', 'no aplica')
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_poblacion_vulnerable,
+            
+            -- Employment preferences (not available in registros table)
+            CAST(NULL AS FLOAT64) as aspiracion_salarial,
+            CAST(NULL AS STRING) as disponibilidad_horaria,
+            CAST(NULL AS INT64) as experiencia_laboral_anos,
+            'Desconocido' as rango_experiencia,
+            CAST(NULL AS STRING) as areas_interes,
+            
+            -- Registration metadata
+            tipo_registro,
+            canal_de_registro as canal_registro,
+            CASE
+              WHEN tipo_registro = 'Registro_nuevo' AND canal_de_registro = 'Agencia' THEN 'Registro nuevo'
+              WHEN tipo_registro = 'Actualizacion' AND canal_de_registro = 'Agencia' THEN 'Actualización'
+              WHEN canal_de_registro = 'Autoregistro' AND tipo_registro = 'Registro_nuevo' THEN 'Autorregistro'
+              ELSE 'Otro'
+            END as tipo_canal_registro,
+            punto_atencion as agencia_registro,
+            CAST(NULL AS STRING) as estado_hoja_vida,
+            TO_HEX(MD5(COALESCE(punto_atencion, 'UNKNOWN'))) as agencia_id,
+            
+            -- Source tracking
+            filename,
+            CURRENT_TIMESTAMP() as fecha_carga
+            
+          FROM `{{ render(vars.project_id) }}.{{ render(vars.source_dataset) }}.{{ render(vars.source_table) }}`
+          WHERE fecha_accion IS NOT NULL;
+    else:
+      - id: ensure_fact_table_exists
+        type: io.kestra.plugin.gcp.bigquery.Query
+        sql: |
+          -- Ensure fact table exists before incremental update
+          CREATE TABLE IF NOT EXISTS `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}` (
+            fact_id STRING NOT NULL,
+            unique_row_id STRING,
+            cedula STRING,
+            fecha_accion TIMESTAMP,
+            year INT64 NOT NULL,
+            month INT64 NOT NULL,
+            quarter INT64,
+            week INT64,
+            day_of_week INT64,
+            nombre_completo STRING,
+            edad INT64,
+            rango_edad STRING,
+            rango_etareo STRING,
+            sexo STRING,
+            estado_civil STRING,
+            nivel_educativo STRING,
+            categoria_educativa STRING,
+            titulo_obtenido STRING,
+            ciudad STRING,
+            departamento STRING,
+            barrio STRING,
+            direccion STRING,
+            geografia_id STRING,
+            telefono STRING,
+            correo_electronico STRING,
+            es_discapacidad BOOL,
+            tipo_discapacidad STRING,
+            es_victima_conflicto BOOL,
+            es_victima_violencia_genero BOOL,
+            es_migrante BOOL,
+            tipo_migrante STRING,
+            es_etnia BOOL,
+            tipo_etnia STRING,
+            es_reincorporado BOOL,
+            es_cabeza_familia BOOL,
+            es_poblacion_vulnerable BOOL,
+            aspiracion_salarial FLOAT64,
+            disponibilidad_horaria STRING,
+            experiencia_laboral_anos INT64,
+            rango_experiencia STRING,
+            areas_interes STRING,
+            tipo_registro STRING,
+            canal_registro STRING,
+            tipo_canal_registro STRING,
+            agencia_registro STRING,
+            estado_hoja_vida STRING,
+            agencia_id STRING,
+            filename STRING,
+            fecha_carga TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+          )
+          PARTITION BY TIMESTAMP_TRUNC(fecha_accion, MONTH)
+          CLUSTER BY nivel_educativo, rango_edad, sexo
+          OPTIONS(
+            description='Fact table for job seeker CV registrations - monthly partitions',
+            require_partition_filter=true
+          );
+
+      - id: refresh_fact_incremental
+        type: io.kestra.plugin.gcp.bigquery.Query
+        sql: |
+          -- Monthly incremental refresh: delete and insert data for the specified month
+          DELETE FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}`
+          WHERE TIMESTAMP_TRUNC(fecha_accion, MONTH) = TIMESTAMP('{{ render(vars.start_date) }}');
+          
+          INSERT INTO `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}` (
+            fact_id, unique_row_id, cedula, fecha_accion, year, month, quarter, week, day_of_week,
+            nombre_completo, edad, rango_edad, rango_etareo, sexo, estado_civil,
+            nivel_educativo, categoria_educativa, titulo_obtenido,
+            ciudad, departamento, barrio, direccion, geografia_id,
+            telefono, correo_electronico,
+            es_discapacidad, tipo_discapacidad, es_victima_conflicto, es_victima_violencia_genero,
+            es_migrante, tipo_migrante, es_etnia, tipo_etnia, es_reincorporado, es_cabeza_familia,
+            es_poblacion_vulnerable,
+            aspiracion_salarial, disponibilidad_horaria, experiencia_laboral_anos, rango_experiencia,
+            areas_interes, tipo_registro, canal_registro, tipo_canal_registro, agencia_registro, estado_hoja_vida, agencia_id,
+            filename, fecha_carga
+          )
+          SELECT
+            unique_row_id as fact_id,
+            unique_row_id,
+            numero_documento as cedula,
+            fecha_accion,
+            {{ inputs.year_of_interest }} as year,
+            {{ inputs.month_of_interest }} as month,
+            EXTRACT(QUARTER FROM fecha_accion) as quarter,
+            EXTRACT(WEEK FROM fecha_accion) as week,
+            EXTRACT(DAYOFWEEK FROM fecha_accion) as day_of_week,
+            CONCAT(COALESCE(nombres, ''), ' ', COALESCE(apellidos, '')) as nombre_completo,
+            edad,
+            CASE 
+              WHEN edad < 18 THEN 'Menor de 18'
+              WHEN edad BETWEEN 18 AND 28 THEN '18-28'
+              WHEN edad BETWEEN 29 AND 39 THEN '29-39'
+              WHEN edad BETWEEN 40 AND 49 THEN '40-49'
+              WHEN edad BETWEEN 50 AND 59 THEN '50-59'
+              WHEN edad > 60 THEN 'Más de 60'
+              ELSE 'Desconocido'
+            END as rango_edad,
+            CASE 
+              WHEN edad < 18 THEN 'Menor de 18'
+              WHEN edad BETWEEN 18 AND 28 THEN '18-28'
+              WHEN edad BETWEEN 29 AND 59 THEN '29-59'
+              WHEN edad > 60 THEN 'Más de 60'
+              ELSE 'Desconocido'
+            END as rango_etareo,
+            genero as sexo,
+            CAST(NULL AS STRING) as estado_civil,
+            nivel_de_estudio as nivel_educativo,
+            CASE 
+              WHEN UPPER(nivel_de_estudio) LIKE '%PRIMARIA%' THEN 'Básica'
+              WHEN UPPER(nivel_de_estudio) LIKE '%SECUNDARIA%' OR UPPER(nivel_de_estudio) LIKE '%BACHILLER%' THEN 'Secundaria'
+              WHEN UPPER(nivel_de_estudio) LIKE '%TECNICO%' OR UPPER(nivel_de_estudio) LIKE '%TECNOLOG%' OR UPPER(nivel_de_estudio) LIKE '%TÉCNICO%' OR UPPER(nivel_de_estudio) LIKE '%TECNÓLOG%' THEN 'Técnico/Tecnológico'
+              WHEN UPPER(nivel_de_estudio) LIKE '%PROFESIONAL%' OR UPPER(nivel_de_estudio) LIKE '%UNIVERSITARIO%' THEN 'Profesional'
+              WHEN UPPER(nivel_de_estudio) LIKE '%POSGRADO%' OR UPPER(nivel_de_estudio) LIKE '%MAESTRIA%' OR UPPER(nivel_de_estudio) LIKE '%ESPECIALIZACION%' THEN 'Posgrado'
+              ELSE 'Otro'
+            END as categoria_educativa,
+            titulo_homologado as titulo_obtenido,
+            ciudad_de_residencia as ciudad,
+            CAST(NULL AS STRING) as departamento,
+            barrio_donde_vive as barrio,
+            CAST(NULL AS STRING) as direccion,
+            TO_HEX(MD5(CONCAT(
+              'UNKNOWN',
+              '|',
+              COALESCE(ciudad_de_residencia, 'UNKNOWN')
+            ))) as geografia_id,
+            COALESCE(celular, telefono) as telefono,
+            email as correo_electronico,
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(discapacidad, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno', 'no aplica') 
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_discapacidad,
+            discapacidad as tipo_discapacidad,
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(vca, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno', 'no aplica') 
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_victima_conflicto,
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(vvg, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno', 'no aplica') 
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_victima_violencia_genero,
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(migrante, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno', 'no aplica') 
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_migrante,
+            migrante as tipo_migrante,
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(grupos_etnicos, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno', 'no aplica', 'ninguna etnia') 
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_etnia,
+            grupos_etnicos as tipo_etnia,
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(reincorporados, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno', 'no aplica') 
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_reincorporado,
+            CAST(NULL AS BOOL) as es_cabeza_familia,
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(discapacidad, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno', 'no aplica')
+                OR LOWER(TRIM(COALESCE(vca, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno', 'no aplica')
+                OR LOWER(TRIM(COALESCE(vvg, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno', 'no aplica')
+                OR LOWER(TRIM(COALESCE(migrante, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno', 'no aplica')
+                OR LOWER(TRIM(COALESCE(grupos_etnicos, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno', 'no aplica', 'ninguna etnia')
+                OR LOWER(TRIM(COALESCE(reincorporados, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno', 'no aplica')
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_poblacion_vulnerable,
+            CAST(NULL AS FLOAT64) as aspiracion_salarial,
+            CAST(NULL AS STRING) as disponibilidad_horaria,
+            CAST(NULL AS INT64) as experiencia_laboral_anos,
+            'Desconocido' as rango_experiencia,
+            CAST(NULL AS STRING) as areas_interes,
+            tipo_registro,
+            canal_de_registro as canal_registro,
+            CASE
+              WHEN tipo_registro = 'Registro_nuevo' AND canal_de_registro = 'Agencia' THEN 'Registro nuevo'
+              WHEN tipo_registro = 'Actualizacion' AND canal_de_registro = 'Agencia' THEN 'Actualización'
+              WHEN canal_de_registro = 'Autoregistro' AND tipo_registro = 'Registro_nuevo' THEN 'Autorregistro'
+              ELSE 'Otro'
+            END as tipo_canal_registro,
+            punto_atencion as agencia_registro,
+            CAST(NULL AS STRING) as estado_hoja_vida,
+            TO_HEX(MD5(COALESCE(punto_atencion, 'UNKNOWN'))) as agencia_id,
+            filename,
+            CURRENT_TIMESTAMP() as fecha_carga
+            
+          FROM `{{ render(vars.project_id) }}.{{ render(vars.source_dataset) }}.{{ render(vars.source_table) }}`
+          WHERE EXTRACT(MONTH FROM fecha_accion) = {{ inputs.month_of_interest }}
+            AND EXTRACT(YEAR FROM fecha_accion) = {{ inputs.year_of_interest }}
+            AND fecha_accion IS NOT NULL;
+
+  - id: refresh_monthly_aggregations
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{ inputs.full_refresh }}"
+    then:
+      - id: refresh_agg_full
+        type: io.kestra.plugin.gcp.bigquery.Query
+        sql: |
+          -- Full refresh: recreate entire aggregation table from ALL months in fact table
+          CREATE OR REPLACE TABLE `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.agg_table) }}`
+          PARTITION BY RANGE_BUCKET(year, GENERATE_ARRAY(2020, 2030, 1))
+          CLUSTER BY categoria_educativa, rango_edad, sexo, tipo_canal_registro
+          OPTIONS(
+            description='Monthly aggregations of job seeker registrations by education, age, and vulnerability',
+            require_partition_filter=false
+          )
+          AS
+          SELECT
+            year,
+            month,
+            departamento,
+            categoria_educativa,
+            rango_edad,
+            rango_etareo,
+            sexo,
+            tipo_canal_registro,
+            es_poblacion_vulnerable,
+            COUNT(*) as total_registros,
+            SUM(CAST(es_discapacidad AS INT64)) as total_discapacidad,
+            SUM(CAST(es_victima_conflicto AS INT64)) as total_victima_conflicto,
+            SUM(CAST(es_victima_violencia_genero AS INT64)) as total_victima_violencia_genero,
+            SUM(CAST(es_migrante AS INT64)) as total_migrante,
+            SUM(CAST(es_etnia AS INT64)) as total_etnia,
+            SUM(CAST(es_reincorporado AS INT64)) as total_reincorporado,
+            SUM(CAST(es_cabeza_familia AS INT64)) as total_cabeza_familia,
+            ROUND(AVG(edad), 2) as promedio_edad,
+            ROUND(AVG(experiencia_laboral_anos), 2) as promedio_experiencia,
+            ROUND(AVG(aspiracion_salarial), 2) as promedio_aspiracion_salarial,
+            MAX(fecha_accion) as registro_mas_reciente,
+            CURRENT_TIMESTAMP() as fecha_actualizacion
+          FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}`
+          WHERE fecha_accion >= '2020-01-01'  -- Broad filter to satisfy partition requirement
+          GROUP BY 
+            year, month, departamento, categoria_educativa, rango_edad, rango_etareo, sexo, tipo_canal_registro, es_poblacion_vulnerable;
+    else:
+      - id: ensure_agg_table_exists
+        type: io.kestra.plugin.gcp.bigquery.Query
+        sql: |
+          -- Ensure aggregation table exists before incremental update
+          CREATE TABLE IF NOT EXISTS `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.agg_table) }}` (
+            year INT64 NOT NULL,
+            month INT64 NOT NULL,
+            departamento STRING,
+            categoria_educativa STRING,
+            rango_edad STRING,
+            rango_etareo STRING,
+            sexo STRING,
+            tipo_canal_registro STRING,
+            es_poblacion_vulnerable BOOL,
+            total_registros INT64,
+            total_discapacidad INT64,
+            total_victima_conflicto INT64,
+            total_victima_violencia_genero INT64,
+            total_migrante INT64,
+            total_etnia INT64,
+            total_reincorporado INT64,
+            total_cabeza_familia INT64,
+            promedio_edad FLOAT64,
+            promedio_experiencia FLOAT64,
+            promedio_aspiracion_salarial FLOAT64,
+            registro_mas_reciente TIMESTAMP,
+            fecha_actualizacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+          )
+          PARTITION BY RANGE_BUCKET(year, GENERATE_ARRAY(2020, 2030, 1))
+          CLUSTER BY categoria_educativa, rango_edad, sexo, tipo_canal_registro
+          OPTIONS(
+            description='Monthly aggregations of job seeker registrations by education, age, and vulnerability',
+            require_partition_filter=false
+          );
+
+      - id: refresh_agg_incremental
+        type: io.kestra.plugin.gcp.bigquery.Query
+        sql: |
+          -- Incremental refresh: delete and insert aggregations for the selected month ONLY
+          DELETE FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.agg_table) }}`
+          WHERE year = {{ inputs.year_of_interest }} 
+            AND month = {{ inputs.month_of_interest }};
+          
+          INSERT INTO `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.agg_table) }}`
+          (
+            year, month, departamento, categoria_educativa, rango_edad, rango_etareo, sexo, tipo_canal_registro, es_poblacion_vulnerable,
+            total_registros, total_discapacidad, total_victima_conflicto, total_victima_violencia_genero,
+            total_migrante, total_etnia, total_reincorporado, total_cabeza_familia,
+            promedio_edad, promedio_experiencia, promedio_aspiracion_salarial, registro_mas_reciente,
+            fecha_actualizacion
+          )
+          SELECT
+            year,
+            month,
+            departamento,
+            categoria_educativa,
+            rango_edad,
+            rango_etareo,
+            sexo,
+            tipo_canal_registro,
+            es_poblacion_vulnerable,
+            COUNT(*) as total_registros,
+            SUM(CAST(es_discapacidad AS INT64)) as total_discapacidad,
+            SUM(CAST(es_victima_conflicto AS INT64)) as total_victima_conflicto,
+            SUM(CAST(es_victima_violencia_genero AS INT64)) as total_victima_violencia_genero,
+            SUM(CAST(es_migrante AS INT64)) as total_migrante,
+            SUM(CAST(es_etnia AS INT64)) as total_etnia,
+            SUM(CAST(es_reincorporado AS INT64)) as total_reincorporado,
+            SUM(CAST(es_cabeza_familia AS INT64)) as total_cabeza_familia,
+            ROUND(AVG(edad), 2) as promedio_edad,
+            ROUND(AVG(experiencia_laboral_anos), 2) as promedio_experiencia,
+            ROUND(AVG(aspiracion_salarial), 2) as promedio_aspiracion_salarial,
+            MAX(fecha_accion) as registro_mas_reciente,
+            CURRENT_TIMESTAMP() as fecha_actualizacion
+          FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}`
+          WHERE TIMESTAMP_TRUNC(fecha_accion, MONTH) = TIMESTAMP('{{ render(vars.start_date) }}')
+          GROUP BY 
+            year, month, departamento, categoria_educativa, rango_edad, rango_etareo, sexo, tipo_canal_registro, es_poblacion_vulnerable;
+
+  - id: get_fact_record_count
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      SELECT 
+        COUNT(*) as total_registros,
+        COUNT(DISTINCT cedula) as personas_unicas,
+        SUM(CAST(es_poblacion_vulnerable AS INT64)) as total_vulnerables,
+        ROUND(AVG(edad), 2) as promedio_edad,
+        MIN(fecha_accion) as registro_mas_antiguo,
+        MAX(fecha_accion) as registro_mas_reciente
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}`
+      WHERE TIMESTAMP_TRUNC(fecha_accion, MONTH) = TIMESTAMP('{{ render(vars.start_date) }}');
+    store: true
+
+  - id: validate_aggregations
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      -- Top 10 combinations by registration volume
+      SELECT 
+        departamento,
+        categoria_educativa,
+        rango_edad,
+        rango_etareo,
+        sexo,
+        total_registros,
+        total_discapacidad,
+        total_victima_conflicto,
+        total_migrante,
+        ROUND(promedio_edad, 1) as promedio_edad,
+        ROUND(promedio_aspiracion_salarial, 0) as promedio_salario
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.agg_table) }}`
+      WHERE year = {{ inputs.year_of_interest }}
+        AND month = {{ inputs.month_of_interest }}
+      ORDER BY total_registros DESC
+      LIMIT 10;
+    store: true
+
+  - id: get_vulnerability_summary
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      SELECT
+        'Discapacidad' as tipo_vulnerabilidad,
+        SUM(total_discapacidad) as total,
+        ROUND(AVG(promedio_edad), 1) as edad_promedio,
+        ROUND(AVG(promedio_experiencia), 1) as experiencia_promedio
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.agg_table) }}`
+      WHERE year = {{ inputs.year_of_interest }} AND month = {{ inputs.month_of_interest }}
+      
+      UNION ALL
+      
+      SELECT 'Víctima Conflicto Armado', SUM(total_victima_conflicto),
+        ROUND(AVG(promedio_edad), 1), ROUND(AVG(promedio_experiencia), 1)
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.agg_table) }}`
+      WHERE year = {{ inputs.year_of_interest }} AND month = {{ inputs.month_of_interest }}
+      
+      UNION ALL
+      
+      SELECT 'Víctima Violencia Género', SUM(total_victima_violencia_genero),
+        ROUND(AVG(promedio_edad), 1), ROUND(AVG(promedio_experiencia), 1)
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.agg_table) }}`
+      WHERE year = {{ inputs.year_of_interest }} AND month = {{ inputs.month_of_interest }}
+      
+      UNION ALL
+      
+      SELECT 'Migrante', SUM(total_migrante),
+        ROUND(AVG(promedio_edad), 1), ROUND(AVG(promedio_experiencia), 1)
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.agg_table) }}`
+      WHERE year = {{ inputs.year_of_interest }} AND month = {{ inputs.month_of_interest }}
+      
+      UNION ALL
+      
+      SELECT 'Etnia', SUM(total_etnia),
+        ROUND(AVG(promedio_edad), 1), ROUND(AVG(promedio_experiencia), 1)
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.agg_table) }}`
+      WHERE year = {{ inputs.year_of_interest }} AND month = {{ inputs.month_of_interest }}
+      
+      UNION ALL
+      
+      SELECT 'Reincorporado', SUM(total_reincorporado),
+        ROUND(AVG(promedio_edad), 1), ROUND(AVG(promedio_experiencia), 1)
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.agg_table) }}`
+      WHERE year = {{ inputs.year_of_interest }} AND month = {{ inputs.month_of_interest }}
+      
+      ORDER BY total DESC;
+    store: true
+
+  - id: convert_fact_count_to_csv
+    type: io.kestra.plugin.serdes.csv.IonToCsv
+    from: "{{ outputs.get_fact_record_count.uri }}"
+
+  - id: convert_aggregations_to_csv
+    type: io.kestra.plugin.serdes.csv.IonToCsv
+    from: "{{ outputs.validate_aggregations.uri }}"
+
+  - id: convert_vulnerability_to_csv
+    type: io.kestra.plugin.serdes.csv.IonToCsv
+    from: "{{ outputs.get_vulnerability_summary.uri }}"
+
+  - id: log_completion
+    type: io.kestra.plugin.core.log.Log
+    message: |
+      ===== Job Seeker Registration Analytics Data Mart Refresh Complete =====
+      Refresh Type: {{ inputs.full_refresh and 'Full' or 'Monthly Incremental' }}
+      Period: {{ render(vars.month_name) | title }} {{ inputs.year_of_interest }}
+      
+      Fact Table: {{ vars.project_id }}.{{ vars.dataset_id }}.{{ vars.fact_table }}
+      Aggregation Table: {{ vars.project_id }}.{{ vars.dataset_id }}.{{ vars.agg_table }}
+      
+      Both tables are ready for querying and analytics.
+
+  - id: send_completion_email
+    type: io.kestra.plugin.notifications.mail.MailSend
+    from: "{{ kv('SENDER_EMAIL') }}"
+    to: "{{ kv('RECIPIENT_EMAILS') }}"
+    subject: "✅ Job Seeker Registration Data Mart Refreshed - {{ render(vars.month_name) | title }} {{ inputs.year_of_interest }} ({{ inputs.full_refresh and 'Full' or 'Incremental' }})"
+    htmlTextContent: |
+      <h2>Job Seeker Registration Analytics Data Mart Refresh Completed</h2>
+      
+      <h3>Refresh Details</h3>
+      <ul>
+        <li><strong>Refresh Type:</strong> {{ inputs.full_refresh and 'Full Refresh (Manual)' or 'Monthly Incremental Update' }}</li>
+        <li><strong>Period:</strong> {{ render(vars.month_name) | title }} {{ inputs.year_of_interest }}</li>
+        <li><strong>Date Range:</strong> {{ render(vars.start_date) }} to {{ render(vars.end_date) }}</li>
+        <li><strong>Execution Time:</strong> {{ now() }}</li>
+      </ul>
+      
+      <h3>Data Mart Structure</h3>
+      <ul>
+        <li><strong>Fact Table:</strong> {{ vars.fact_table }} (individual CV registrations)</li>
+        <li><strong>Aggregation Table:</strong> {{ vars.agg_table }} (monthly summaries)</li>
+      </ul>
+      
+      <h3>Key Features</h3>
+      <ul>
+        <li>✅ Individual-level CV registrations with demographics</li>
+        <li>✅ Educational level categorization (Básica, Secundaria, Técnico, Profesional, Posgrado)</li>
+        <li>✅ Age range segmentation (18-25, 26-35, 36-45, 46-55, 56-65, 65+)</li>
+        <li>✅ Vulnerability indicators (Disability, Armed Conflict Victims, Gender Violence, Migrants, Ethnic Groups, Reincorporated)</li>
+        <li>✅ Geographic distribution (Departamento, Ciudad, Barrio)</li>
+        <li>✅ Experience level ranges (0, 1-2, 3-5, 6-10, 10+ years)</li>
+        <li>✅ Salary aspirations and availability</li>
+        <li>✅ Registration channel tracking</li>
+        <li>✅ Monthly aggregations for fast analytics</li>
+        <li>✅ Partitioned by registration month for performance</li>
+        <li>✅ Clustered by education level, age range, and department</li>
+      </ul>
+      
+      <h3>Sample Analytical Queries</h3>
+      
+      <h4>1. Education Level Distribution by Gender</h4>
+      <pre style="background: #f5f5f5; padding: 10px; border-radius: 5px;">
+      SELECT 
+        categoria_educativa,
+        sexo,
+        SUM(total_registros) as registros,
+        ROUND(AVG(promedio_edad), 1) as edad_promedio,
+        ROUND(AVG(promedio_aspiracion_salarial), 0) as salario_promedio
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.agg_table) }}`
+      WHERE year = {{ inputs.year_of_interest }} AND month = {{ inputs.month_of_interest }}
+      GROUP BY categoria_educativa, sexo
+      ORDER BY categoria_educativa, sexo;
+      </pre>
+      
+      <h4>2. Vulnerable Populations by Age Range</h4>
+      <pre style="background: #f5f5f5; padding: 10px; border-radius: 5px;">
+      SELECT 
+        rango_edad,
+        SUM(total_registros) as total,
+        SUM(total_discapacidad) as con_discapacidad,
+        SUM(total_victima_conflicto) as victimas_conflicto,
+        SUM(total_migrante) as migrantes,
+        SUM(total_etnia) as etnias,
+        ROUND(SUM(total_discapacidad) * 100.0 / SUM(total_registros), 2) as pct_discapacidad
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.agg_table) }}`
+      WHERE year = {{ inputs.year_of_interest }} AND month = {{ inputs.month_of_interest }}
+      GROUP BY rango_edad
+      ORDER BY rango_edad;
+      </pre>
+      
+      <h4>3. Geographic Distribution of Registrations</h4>
+      <pre style="background: #f5f5f5; padding: 10px; border-radius: 5px;">
+      SELECT 
+        departamento,
+        SUM(total_registros) as registros,
+        SUM(CASE WHEN es_poblacion_vulnerable THEN total_registros ELSE 0 END) as vulnerables,
+        ROUND(AVG(promedio_edad), 1) as edad_promedio,
+        ROUND(AVG(promedio_experiencia), 1) as experiencia_promedio
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.agg_table) }}`
+      WHERE year = {{ inputs.year_of_interest }} AND month = {{ inputs.month_of_interest }}
+      GROUP BY departamento
+      ORDER BY registros DESC
+      LIMIT 15;
+      </pre>
+      
+      <h4>4. Education-Experience Matrix</h4>
+      <pre style="background: #f5f5f5; padding: 10px; border-radius: 5px;">
+      SELECT 
+        f.categoria_educativa,
+        f.rango_experiencia,
+        COUNT(*) as registros,
+        ROUND(AVG(f.aspiracion_salarial), 0) as salario_promedio,
+        SUM(CAST(f.es_poblacion_vulnerable AS INT64)) as vulnerables
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}` f
+      WHERE TIMESTAMP_TRUNC(f.fecha_accion, MONTH) = TIMESTAMP('{{ render(vars.start_date) }}')
+      GROUP BY f.categoria_educativa, f.rango_experiencia
+      ORDER BY f.categoria_educativa, f.rango_experiencia;
+      </pre>
+      
+      <h4>5. Vulnerability Deep Dive</h4>
+      <pre style="background: #f5f5f5; padding: 10px; border-radius: 5px;">
+      -- Detailed vulnerability breakdown
+      SELECT 
+        tipo_discapacidad,
+        COUNT(*) as total,
+        ROUND(AVG(edad), 1) as edad_promedio,
+        COUNT(DISTINCT departamento) as departamentos_presentes
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}`
+      WHERE TIMESTAMP_TRUNC(fecha_accion, MONTH) = TIMESTAMP('{{ render(vars.start_date) }}')
+        AND es_discapacidad = TRUE
+      GROUP BY tipo_discapacidad
+      ORDER BY total DESC;
+      </pre>
+      
+      <p>See attached files for detailed statistics and validation results.</p>
+      
+      <p><em>The data mart is now ready for querying in BigQuery and can be connected to your BI tools.</em></p>
+    attachments:
+      - name: fact_table_summary_{{ inputs.month_of_interest }}_{{ inputs.year_of_interest }}.csv
+        uri: "{{ outputs.convert_fact_count_to_csv.uri }}"
+        contentType: text/csv
+      - name: top_aggregations_{{ inputs.month_of_interest }}_{{ inputs.year_of_interest }}.csv
+        uri: "{{ outputs.convert_aggregations_to_csv.uri }}"
+        contentType: text/csv
+      - name: vulnerability_summary_{{ inputs.month_of_interest }}_{{ inputs.year_of_interest }}.csv
+        uri: "{{ outputs.convert_vulnerability_to_csv.uri }}"
+        contentType: text/csv
+    host: "{{ kv('SMTP_SERVER') }}"
+    port: "{{ kv('SMTP_PORT') }}"
+    username: "{{ kv('GMAIL_USERNAME') }}"
+    password: "{{ kv('GMAIL_APP_PASSWORD') }}"
+    transportStrategy: SMTP_TLS
+
+errors:
+  - id: error_notification
+    type: io.kestra.plugin.notifications.mail.MailSend
+    from: "{{ kv('SENDER_EMAIL') }}"
+    to: "{{ kv('RECIPIENT_EMAILS') }}"
+    subject: "❌ Job Seeker Registration Data Mart Load Failed - {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}"
+    htmlTextContent: |
+      <h2>Job Seeker Registration Data Mart Load - Failed</h2>
+      <p>An error occurred while loading data to the BigQuery data mart.</p>
+      
+      <h3>Error Details:</h3>
+      <ul>
+        <li><strong>Refresh Type:</strong> {{ inputs.full_refresh and 'Full Refresh' or 'Incremental' }}</li>
+        <li><strong>Period:</strong> {{ render(vars.month_name) | title }} {{ inputs.year_of_interest }}</li>
+        <li><strong>Workflow:</strong> {{ flow.id }}</li>
+        <li><strong>Execution:</strong> {{ execution.id }}</li>
+      </ul>
+      
+      <p>Please check the Kestra logs for detailed error information.</p>
+    host: "{{ kv('SMTP_SERVER') }}"
+    port: "{{ kv('SMTP_PORT') }}"
+    username: "{{ kv('GMAIL_USERNAME') }}"
+    password: "{{ kv('GMAIL_APP_PASSWORD') }}"
+    transportStrategy: SMTP_TLS
+
+triggers:
+  - id: schedule_monthly_refresh
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 5 5 * *"
+    description: "Run monthly incremental refresh on the 5th of each month at 5 AM"
+    inputs:
+      full_refresh: false
+      year_of_interest: "{{ now() | dateAdd(-1, 'MONTHS') | date('yyyy') }}"
+      month_of_interest: "{{ now() | dateAdd(-1, 'MONTHS') | date('M') | int }}"

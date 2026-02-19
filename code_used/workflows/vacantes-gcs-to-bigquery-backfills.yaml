@@ -1,0 +1,282 @@
+id: vacantes-gcs-to-bigquery-backfills
+namespace: public_employment_pulse
+
+inputs:
+  - id: data_processed
+    type: SELECT
+    description: Data of interest to load.
+    displayName: "Choose the data of interest."
+    defaults: vacantes
+    values: [ registro_hv, orientacion, intermediacion, vacantes, empresas ]
+
+  - id: load_mode
+    type: SELECT
+    description: How to load data into BigQuery.
+    displayName: "Choose load mode."
+    defaults: WRITE_APPEND
+    values: [ WRITE_APPEND, WRITE_TRUNCATE, WRITE_EMPTY ]
+
+variables:
+  month_name: "{{ trigger.date | date('MMMM') | lower }}"
+  gcs_path: "gs://employment-agency-operational-data/{{ inputs.data_processed }}/{{ trigger.date | date('yyyy') }}/{{ vars.month_name }}/vacantes_{{ trigger.date | date('yyyy') }}_{{ trigger.date | date('M') }}.parquet"
+  bq_dataset: "operations_co"
+  bq_table: "{{ inputs.data_processed }}"
+
+tasks:
+  - id: log_workflow_start
+    type: io.kestra.plugin.core.log.Log
+    message: |
+      Starting BigQuery load for:
+      File: {{ render(vars.gcs_path) }}
+      Dataset: {{ render(vars.bq_dataset) }}
+      Table: {{ render(vars.bq_table) }}
+      Load Mode: {{ inputs.load_mode }}
+
+  - id: create_bigquery_dataset
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      CREATE SCHEMA IF NOT EXISTS `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}`
+      OPTIONS(
+        location='US',
+        description='Public Employment Pulse Data'
+      );
+
+  - id: create_bigquery_table
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      CREATE TABLE IF NOT EXISTS `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}` (
+        codigo_proceso STRING,
+        nombre_vacante STRING,
+        cargo STRING,
+        n_postulados INT64,
+        empresa STRING,
+        tipodocumentoempresa STRING,
+        numerodocumentoempresa STRING,
+        fecha_registro TIMESTAMP,
+        fecha_vencimiento TIMESTAMP,
+        estado_actual STRING,
+        tipo_de_vacante STRING,
+        puestos_de_trabajo INT64,
+        tipo_de_contrato STRING,
+        agente_aprobo STRING,
+        punto_atencion STRING,
+        pais STRING,
+        mes INT64,
+        anio INT64,
+        created_at TIMESTAMP,
+        filename STRING,
+        loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+      )
+      PARTITION BY DATE(fecha_registro)
+      CLUSTER BY empresa, estado_actual, agente_aprobo
+      OPTIONS(
+        description='Job vacancies data',
+        require_partition_filter=false
+      );
+
+  - id: load_parquet_to_bigquery
+    type: io.kestra.plugin.gcp.bigquery.LoadFromGcs
+    from: 
+      - "{{ render(vars.gcs_path) }}"
+    destinationTable: "{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}"
+    format: PARQUET
+    writeDisposition: "{{ inputs.load_mode }}"
+    autodetect: false
+    schema:
+      fields:
+        - name: codigo_proceso
+          type: STRING
+          mode: NULLABLE
+        - name: nombre_vacante
+          type: STRING
+          mode: NULLABLE
+        - name: cargo
+          type: STRING
+          mode: NULLABLE
+        - name: n_postulados
+          type: INT64
+          mode: NULLABLE
+        - name: empresa
+          type: STRING
+          mode: NULLABLE
+        - name: tipodocumentoempresa
+          type: STRING
+          mode: NULLABLE
+        - name: numerodocumentoempresa
+          type: STRING
+          mode: NULLABLE
+        - name: fecha_registro
+          type: TIMESTAMP
+          mode: NULLABLE
+        - name: fecha_vencimiento
+          type: TIMESTAMP
+          mode: NULLABLE
+        - name: estado_actual
+          type: STRING
+          mode: NULLABLE
+        - name: tipo_de_vacante
+          type: STRING
+          mode: NULLABLE
+        - name: puestos_de_trabajo
+          type: INT64
+          mode: NULLABLE
+        - name: tipo_de_contrato
+          type: STRING
+          mode: NULLABLE
+        - name: agente_aprobo
+          type: STRING
+          mode: NULLABLE
+        - name: punto_atencion
+          type: STRING
+          mode: NULLABLE
+        - name: pais
+          type: STRING
+          mode: NULLABLE
+        - name: mes
+          type: INT64
+          mode: NULLABLE
+        - name: anio
+          type: INT64
+          mode: NULLABLE
+        - name: created_at
+          type: TIMESTAMP
+          mode: NULLABLE
+        - name: filename
+          type: STRING
+          mode: NULLABLE
+
+  - id: verify_load_count
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      SELECT 
+        COUNT(*) as total_records,
+        COUNT(DISTINCT codigo_proceso) as unique_processes,
+        MIN(fecha_registro) as earliest_date,
+        MAX(fecha_registro) as latest_date,
+        COUNT(DISTINCT empresa) as unique_companies,
+        filename
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE filename = 'vacantes_{{ trigger.date | date('yyyy') }}_{{ trigger.date | date('M') }}'
+      GROUP BY filename;
+    store: true
+
+  - id: check_data_quality
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      SELECT
+        'Missing agente_aprobo' as issue,
+        COUNT(*) as count
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE agente_aprobo IS NULL
+        AND filename = 'vacantes_{{ trigger.date | date('yyyy') }}_{{ trigger.date | date('M') }}'
+      
+      UNION ALL
+      
+      SELECT
+        'Missing puestos_de_trabajo' as issue,
+        COUNT(*) as count
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE puestos_de_trabajo IS NULL
+        AND filename = 'vacantes_{{ trigger.date | date('yyyy') }}_{{ trigger.date | date('M') }}'
+      
+      UNION ALL
+      
+      SELECT
+        'Missing empresa' as issue,
+        COUNT(*) as count
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE empresa IS NULL OR empresa = ''
+        AND filename = 'vacantes_{{ trigger.date | date('yyyy') }}_{{ trigger.date | date('M') }}'
+      
+      UNION ALL
+      
+      SELECT
+        'Missing cargo' as issue,
+        COUNT(*) as count
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE cargo IS NULL OR cargo = ''
+        AND filename = 'vacantes_{{ trigger.date | date('yyyy') }}_{{ trigger.date | date('M') }}'
+      
+      ORDER BY count DESC;
+    store: true
+
+  - id: get_vacancy_statistics
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      SELECT
+        estado_actual,
+        COUNT(*) as count,
+        AVG(n_postulados) as avg_applicants,
+        AVG(puestos_de_trabajo) as avg_positions
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE filename = 'vacantes_{{ trigger.date | date('yyyy') }}_{{ trigger.date | date('M') }}'
+      GROUP BY estado_actual
+      ORDER BY count DESC;
+    store: true
+
+  - id: log_load_summary
+    type: io.kestra.plugin.core.log.Log
+    message: |
+      ===== BigQuery Load Summary =====
+      File: {{ render(vars.gcs_path) }}
+      Dataset: {{ render(vars.bq_dataset) }}
+      Table: {{ render(vars.bq_table) }}
+      Load Mode: {{ inputs.load_mode }}
+      
+      Load completed successfully. Check email for detailed statistics.
+
+  - id: convert_verification_to_csv
+    type: io.kestra.plugin.serdes.csv.IonToCsv
+    from: "{{ outputs.verify_load_count.uri }}"
+
+  - id: convert_quality_to_csv
+    type: io.kestra.plugin.serdes.csv.IonToCsv
+    from: "{{ outputs.check_data_quality.uri }}"
+
+  - id: convert_statistics_to_csv
+    type: io.kestra.plugin.serdes.csv.IonToCsv
+    from: "{{ outputs.get_vacancy_statistics.uri }}"
+
+  - id: send_completion_email
+    type: io.kestra.plugin.notifications.mail.MailSend
+    from: "{{ kv('SENDER_EMAIL') }}"
+    to: "{{ kv('RECIPIENT_EMAILS') }}"
+    subject: "BigQuery Load Complete - {{ inputs.data_processed }} {{ trigger.date | date('MMMM') }}/{{ trigger.date | date('yyyy') }}"
+    htmlTextContent: |
+      <h2>BigQuery Data Load Completed</h2>
+      <p><strong>Dataset:</strong> {{ render(vars.bq_dataset) }}</p>
+      <p><strong>Table:</strong> {{ render(vars.bq_table) }}</p>
+      <p><strong>Source File:</strong> {{ render(vars.gcs_path) }}</p>
+      <p><strong>Load Mode:</strong> {{ inputs.load_mode }}</p>
+      
+      <p>Please see attached files for:</p>
+      <ul>
+        <li>Load statistics (record counts, date ranges)</li>
+        <li>Data quality summary (missing fields)</li>
+        <li>Vacancy statistics (by status)</li>
+      </ul>
+      
+      <p><em>Workflow executed at: {{ now() }}</em></p>
+    attachments:
+      - name: load_statistics.csv
+        uri: "{{ outputs.convert_verification_to_csv.uri }}"
+        contentType: text/csv
+      - name: data_quality.csv
+        uri: "{{ outputs.convert_quality_to_csv.uri }}"
+        contentType: text/csv
+      - name: vacancy_statistics.csv
+        uri: "{{ outputs.convert_statistics_to_csv.uri }}"
+        contentType: text/csv
+    host: "{{ kv('SMTP_SERVER') }}"
+    port: "{{ kv('SMTP_PORT') }}"
+    username: "{{ kv('GMAIL_USERNAME') }}"
+    password: "{{ kv('GMAIL_APP_PASSWORD') }}"
+    transportStrategy: SMTP_TLS
+
+triggers:
+  - id: schedule_monthly_load
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 3 5 * *"  # Run at 3 AM on the 5th of each month (1 hour after raw data pipeline)
+    inputs:
+      data_processed: vacantes
+      load_mode: WRITE_APPEND

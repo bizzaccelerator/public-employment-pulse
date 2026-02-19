@@ -1,0 +1,700 @@
+id: refresh-company-analytics-mart
+namespace: public_employment_pulse
+
+description: |
+  Refresh the company analytics data mart from the base empresas table.
+  This workflow creates an optimized, pre-aggregated table for analytics and reporting.
+
+inputs:
+  - id: full_refresh
+    type: BOOLEAN
+    description: If true, recreates the data mart from scratch (use only when required)
+    displayName: "Full Refresh? (Manual Override)"
+    defaults: false
+
+  - id: year_of_interest
+    type: SELECT
+    description: Year of data to refresh
+    displayName: "Choose the year of interest."
+    defaults: "2026"
+    values: [ "2024", "2025", "2026" ]
+
+  - id: month_of_interest
+    type: INT
+    description: Month of data to refresh (1-12)
+    displayName: "Choose the month number of interest."
+    defaults: 1
+    min: 1
+    max: 12
+
+variables:
+  dataset_operations: "operations_co"
+  dataset_marts: "data_marts"
+  base_table: "empresas"
+  mart_table: "fact_company_registrations"
+  month_name: "{% set month_names = {1: 'january', 2: 'february', 3: 'march', 4: 'april', 5: 'may', 6: 'june', 7: 'july', 8: 'august', 9: 'september', 10: 'october', 11: 'november', 12: 'december'} %}{{ month_names[inputs.month_of_interest] }}"
+  month_padded: "{% if inputs.month_of_interest < 10 %}0{{ inputs.month_of_interest }}{% else %}{{ inputs.month_of_interest }}{% endif %}"
+  start_date: "{{ inputs.year_of_interest }}-{{ render(vars.month_padded) }}-01"
+  end_date: "DATE_ADD(DATE('{{ inputs.year_of_interest }}-{{ render(vars.month_padded) }}-01'), INTERVAL 1 MONTH)"
+
+tasks:
+  - id: log_start
+    type: io.kestra.plugin.core.log.Log
+    message: |
+      Starting Company Analytics Data Mart Refresh
+      Mode: {{ inputs.full_refresh and 'Full Refresh (Manual)' or 'Monthly Incremental Refresh' }}
+      Period: {{ render(vars.month_name) | title }} {{ inputs.year_of_interest }}
+      Date Range: {{ render(vars.start_date) }} to {{ render(vars.end_date) }}
+
+  - id: create_data_marts_dataset
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      CREATE SCHEMA IF NOT EXISTS `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}`
+      OPTIONS(
+        location='US',
+        description='Analytics-ready data marts for company data'
+      );
+
+  - id: refresh_decision
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{ inputs.full_refresh }}"
+    then:
+      - id: refresh_full
+        type: io.kestra.plugin.gcp.bigquery.Query
+        sql: |
+          -- Full refresh: recreate entire table
+          CREATE OR REPLACE TABLE `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table) }}`
+          PARTITION BY DATE_TRUNC(registration_month, MONTH)
+          CLUSTER BY canal_de_registro, sector, naturaleza
+          OPTIONS(
+            description='Monthly company registration metrics with trends and moving averages',
+            labels=[("domain", "employment"), ("refresh_type", "monthly")]
+          )
+          AS
+          WITH monthly_registrations AS (
+            SELECT
+              DATE_TRUNC(DATE(fecha_registro), MONTH) AS registration_month,
+              EXTRACT(YEAR FROM fecha_registro) AS year,
+              EXTRACT(MONTH FROM fecha_registro) AS month,
+              EXTRACT(QUARTER FROM fecha_registro) AS quarter,
+              FORMAT_DATE('%B', fecha_registro) AS month_name,
+              FORMAT_DATE('%Y-%m', fecha_registro) AS year_month,
+              departamento,
+              ciudad,
+              sector,
+              actividad_economica,
+              tamanio,
+              canal_de_registro,
+              naturaleza,
+              
+              COUNT(*) AS total_registrations,
+              COUNT(DISTINCT numero_documento) AS unique_companies,
+              
+              -- Contact Quality Metrics
+              COUNTIF(telefono_clean IS NOT NULL) AS companies_with_phone,
+              COUNTIF(email_administrador IS NOT NULL) AS companies_with_email,
+              COUNTIF(direccion IS NOT NULL AND direccion != '') AS companies_with_address,
+              
+              -- Size Distribution
+              COUNTIF(tamanio = 'Micro') AS micro_companies,
+              COUNTIF(tamanio = 'Pequeña') AS small_companies,
+              COUNTIF(tamanio = 'Mediana') AS medium_companies,
+              COUNTIF(tamanio = 'Grande') AS large_companies,
+              COUNTIF(tamanio = 'Unipersonal') AS unipersonal_companies,
+              
+              -- Channel Distribution
+              COUNTIF(canal_de_registro = 'Autoregistro') AS auto_registrations,
+              COUNTIF(canal_de_registro = 'Agencia') AS agency_registrations,
+              
+              -- Data Quality Score (0-100)
+              ROUND(AVG(
+                CASE WHEN telefono_clean IS NOT NULL THEN 33 ELSE 0 END +
+                CASE WHEN email_administrador IS NOT NULL THEN 33 ELSE 0 END +
+                CASE WHEN direccion IS NOT NULL AND direccion != '' THEN 34 ELSE 0 END
+              ), 2) AS avg_data_quality_score
+              
+            FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_operations) }}.{{ render(vars.base_table) }}`
+            WHERE fecha_registro IS NOT NULL
+            GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13
+          )
+          
+          SELECT
+            -- Date Dimensions
+            registration_month,
+            year,
+            month,
+            quarter,
+            month_name,
+            year_month,
+            
+            -- Geographic Dimensions
+            departamento,
+            ciudad,
+            
+            -- Business Dimensions
+            sector,
+            actividad_economica,
+            tamanio,
+            canal_de_registro,
+            naturaleza,
+            
+            -- Core Metrics
+            total_registrations,
+            unique_companies,
+            companies_with_phone,
+            companies_with_email,
+            companies_with_address,
+            
+            -- Percentage Metrics
+            ROUND(SAFE_DIVIDE(companies_with_phone, unique_companies) * 100, 2) AS pct_with_phone,
+            ROUND(SAFE_DIVIDE(companies_with_email, unique_companies) * 100, 2) AS pct_with_email,
+            ROUND(SAFE_DIVIDE(companies_with_address, unique_companies) * 100, 2) AS pct_with_address,
+            
+            -- Size Distribution
+            micro_companies,
+            small_companies,
+            medium_companies,
+            large_companies,
+            unipersonal_companies,
+            
+            -- Channel Distribution
+            auto_registrations,
+            agency_registrations,
+            
+            -- Quality Score
+            avg_data_quality_score,
+            
+            -- Cumulative Metrics by Department
+            SUM(unique_companies) OVER (
+              PARTITION BY departamento 
+              ORDER BY registration_month 
+              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS cumulative_companies_by_dept,
+            
+            -- Month-over-Month Growth
+            LAG(unique_companies) OVER (
+              PARTITION BY departamento, sector, canal_de_registro, naturaleza
+              ORDER BY registration_month
+            ) AS prev_month_companies,
+            
+            ROUND(SAFE_DIVIDE(
+              unique_companies - LAG(unique_companies) OVER (
+                PARTITION BY departamento, sector, canal_de_registro, naturaleza
+                ORDER BY registration_month
+              ),
+              LAG(unique_companies) OVER (
+                PARTITION BY departamento, sector, canal_de_registro, naturaleza
+                ORDER BY registration_month
+              )
+            ) * 100, 2) AS mom_growth_pct,
+            
+            -- Year-over-Year Comparison
+            LAG(unique_companies, 12) OVER (
+              PARTITION BY departamento, sector, canal_de_registro, naturaleza
+              ORDER BY registration_month
+            ) AS same_month_last_year,
+            
+            ROUND(SAFE_DIVIDE(
+              unique_companies - LAG(unique_companies, 12) OVER (
+                PARTITION BY departamento, sector, canal_de_registro, naturaleza
+                ORDER BY registration_month
+              ),
+              LAG(unique_companies, 12) OVER (
+                PARTITION BY departamento, sector, canal_de_registro, naturaleza
+                ORDER BY registration_month
+              )
+            ) * 100, 2) AS yoy_growth_pct,
+            
+            -- 3-Month Moving Average
+            AVG(unique_companies) OVER (
+              PARTITION BY departamento, sector, canal_de_registro, naturaleza
+              ORDER BY registration_month 
+              ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
+            ) AS three_month_moving_avg,
+            
+            CURRENT_TIMESTAMP() AS mart_refreshed_at
+            
+          FROM monthly_registrations;
+    else:
+      - id: refresh_incremental
+        type: io.kestra.plugin.gcp.bigquery.Query
+        sql: |
+          -- Monthly incremental refresh: update or insert data for the specified month
+          MERGE `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table) }}` AS target
+          USING (
+            WITH monthly_registrations AS (
+              SELECT
+                DATE_TRUNC(DATE(fecha_registro), MONTH) AS registration_month,
+                EXTRACT(YEAR FROM fecha_registro) AS year,
+                EXTRACT(MONTH FROM fecha_registro) AS month,
+                EXTRACT(QUARTER FROM fecha_registro) AS quarter,
+                FORMAT_DATE('%B', fecha_registro) AS month_name,
+                FORMAT_DATE('%Y-%m', fecha_registro) AS year_month,
+                departamento,
+                ciudad,
+                sector,
+                actividad_economica,
+                tamanio,
+                canal_de_registro,
+                naturaleza,
+                
+                COUNT(*) AS total_registrations,
+                COUNT(DISTINCT numero_documento) AS unique_companies,
+                
+                COUNTIF(telefono_clean IS NOT NULL) AS companies_with_phone,
+                COUNTIF(email_administrador IS NOT NULL) AS companies_with_email,
+                COUNTIF(direccion IS NOT NULL AND direccion != '') AS companies_with_address,
+                
+                COUNTIF(tamanio = 'Micro') AS micro_companies,
+                COUNTIF(tamanio = 'Pequeña') AS small_companies,
+                COUNTIF(tamanio = 'Mediana') AS medium_companies,
+                COUNTIF(tamanio = 'Grande') AS large_companies,
+                COUNTIF(tamanio = 'Unipersonal') AS unipersonal_companies,
+                
+                COUNTIF(canal_de_registro = 'Autoregistro') AS auto_registrations,
+                COUNTIF(canal_de_registro = 'Agencia') AS agency_registrations,
+                
+                ROUND(AVG(
+                  CASE WHEN telefono_clean IS NOT NULL THEN 33 ELSE 0 END +
+                  CASE WHEN email_administrador IS NOT NULL THEN 33 ELSE 0 END +
+                  CASE WHEN direccion IS NOT NULL AND direccion != '' THEN 34 ELSE 0 END
+                ), 2) AS avg_data_quality_score
+                
+              FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_operations) }}.{{ render(vars.base_table) }}`
+              WHERE fecha_registro IS NOT NULL
+                AND DATE(fecha_registro) >= DATE('{{ render(vars.start_date) }}')
+                AND DATE(fecha_registro) < {{ render(vars.end_date) }}
+              GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13
+            )
+            
+            SELECT
+              registration_month,
+              year,
+              month,
+              quarter,
+              month_name,
+              year_month,
+              departamento,
+              ciudad,
+              sector,
+              actividad_economica,
+              tamanio,
+              canal_de_registro,
+              naturaleza,
+              total_registrations,
+              unique_companies,
+              companies_with_phone,
+              companies_with_email,
+              companies_with_address,
+              ROUND(SAFE_DIVIDE(companies_with_phone, unique_companies) * 100, 2) AS pct_with_phone,
+              ROUND(SAFE_DIVIDE(companies_with_email, unique_companies) * 100, 2) AS pct_with_email,
+              ROUND(SAFE_DIVIDE(companies_with_address, unique_companies) * 100, 2) AS pct_with_address,
+              micro_companies,
+              small_companies,
+              medium_companies,
+              large_companies,
+              unipersonal_companies,
+              auto_registrations,
+              agency_registrations,
+              avg_data_quality_score,
+              CAST(NULL AS INT64) AS cumulative_companies_by_dept,
+              CAST(NULL AS INT64) AS prev_month_companies,
+              CAST(NULL AS FLOAT64) AS mom_growth_pct,
+              CAST(NULL AS INT64) AS same_month_last_year,
+              CAST(NULL AS FLOAT64) AS yoy_growth_pct,
+              CAST(NULL AS FLOAT64) AS three_month_moving_avg,
+              CURRENT_TIMESTAMP() AS mart_refreshed_at
+              
+            FROM monthly_registrations
+          ) AS source
+          ON target.registration_month = source.registration_month
+            AND target.departamento = source.departamento
+            AND IFNULL(target.ciudad, '') = IFNULL(source.ciudad, '')
+            AND IFNULL(target.sector, '') = IFNULL(source.sector, '')
+            AND IFNULL(target.actividad_economica, '') = IFNULL(source.actividad_economica, '')
+            AND IFNULL(target.tamanio, '') = IFNULL(source.tamanio, '')
+            AND IFNULL(target.canal_de_registro, '') = IFNULL(source.canal_de_registro, '')
+            AND IFNULL(target.naturaleza, '') = IFNULL(source.naturaleza, '')
+          
+          WHEN MATCHED THEN
+            UPDATE SET
+              total_registrations = source.total_registrations,
+              unique_companies = source.unique_companies,
+              companies_with_phone = source.companies_with_phone,
+              companies_with_email = source.companies_with_email,
+              companies_with_address = source.companies_with_address,
+              pct_with_phone = source.pct_with_phone,
+              pct_with_email = source.pct_with_email,
+              pct_with_address = source.pct_with_address,
+              micro_companies = source.micro_companies,
+              small_companies = source.small_companies,
+              medium_companies = source.medium_companies,
+              large_companies = source.large_companies,
+              unipersonal_companies = source.unipersonal_companies,
+              auto_registrations = source.auto_registrations,
+              agency_registrations = source.agency_registrations,
+              avg_data_quality_score = source.avg_data_quality_score,
+              mart_refreshed_at = source.mart_refreshed_at
+          
+          WHEN NOT MATCHED THEN
+            INSERT (
+              registration_month,
+              year,
+              month,
+              quarter,
+              month_name,
+              year_month,
+              departamento,
+              ciudad,
+              sector,
+              actividad_economica,
+              tamanio,
+              canal_de_registro,
+              naturaleza,
+              total_registrations,
+              unique_companies,
+              companies_with_phone,
+              companies_with_email,
+              companies_with_address,
+              pct_with_phone,
+              pct_with_email,
+              pct_with_address,
+              micro_companies,
+              small_companies,
+              medium_companies,
+              large_companies,
+              unipersonal_companies,
+              auto_registrations,
+              agency_registrations,
+              avg_data_quality_score,
+              cumulative_companies_by_dept,
+              prev_month_companies,
+              mom_growth_pct,
+              same_month_last_year,
+              yoy_growth_pct,
+              three_month_moving_avg,
+              mart_refreshed_at
+            )
+            VALUES (
+              source.registration_month,
+              source.year,
+              source.month,
+              source.quarter,
+              source.month_name,
+              source.year_month,
+              source.departamento,
+              source.ciudad,
+              source.sector,
+              source.actividad_economica,
+              source.tamanio,
+              source.canal_de_registro,
+              source.naturaleza,
+              source.total_registrations,
+              source.unique_companies,
+              source.companies_with_phone,
+              source.companies_with_email,
+              source.companies_with_address,
+              source.pct_with_phone,
+              source.pct_with_email,
+              source.pct_with_address,
+              source.micro_companies,
+              source.small_companies,
+              source.medium_companies,
+              source.large_companies,
+              source.unipersonal_companies,
+              source.auto_registrations,
+              source.agency_registrations,
+              source.avg_data_quality_score,
+              source.cumulative_companies_by_dept,
+              source.prev_month_companies,
+              source.mom_growth_pct,
+              source.same_month_last_year,
+              source.yoy_growth_pct,
+              source.three_month_moving_avg,
+              source.mart_refreshed_at
+            );
+
+      - id: recalculate_window_functions
+        type: io.kestra.plugin.gcp.bigquery.Query
+        sql: |
+          -- Recalculate cumulative totals and growth metrics after incremental update
+          CREATE OR REPLACE TABLE `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table) }}`
+          PARTITION BY DATE_TRUNC(registration_month, MONTH)
+          CLUSTER BY canal_de_registro, sector, naturaleza
+          AS
+          SELECT
+            * EXCEPT(cumulative_companies_by_dept, prev_month_companies, mom_growth_pct, 
+                     same_month_last_year, yoy_growth_pct, three_month_moving_avg),
+            
+            -- Recalculate cumulative totals
+            SUM(unique_companies) OVER (
+              PARTITION BY departamento 
+              ORDER BY registration_month 
+              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS cumulative_companies_by_dept,
+            
+            -- Month-over-Month Growth
+            LAG(unique_companies) OVER (
+              PARTITION BY departamento, sector, canal_de_registro, naturaleza
+              ORDER BY registration_month
+            ) AS prev_month_companies,
+            
+            ROUND(SAFE_DIVIDE(
+              unique_companies - LAG(unique_companies) OVER (
+                PARTITION BY departamento, sector, canal_de_registro, naturaleza
+                ORDER BY registration_month
+              ),
+              LAG(unique_companies) OVER (
+                PARTITION BY departamento, sector, canal_de_registro, naturaleza
+                ORDER BY registration_month
+              )
+            ) * 100, 2) AS mom_growth_pct,
+            
+            -- Year-over-Year Comparison
+            LAG(unique_companies, 12) OVER (
+              PARTITION BY departamento, sector, canal_de_registro, naturaleza
+              ORDER BY registration_month
+            ) AS same_month_last_year,
+            
+            ROUND(SAFE_DIVIDE(
+              unique_companies - LAG(unique_companies, 12) OVER (
+                PARTITION BY departamento, sector, canal_de_registro, naturaleza
+                ORDER BY registration_month
+              ),
+              LAG(unique_companies, 12) OVER (
+                PARTITION BY departamento, sector, canal_de_registro, naturaleza
+                ORDER BY registration_month
+              )
+            ) * 100, 2) AS yoy_growth_pct,
+            
+            -- 3-Month Moving Average
+            AVG(unique_companies) OVER (
+              PARTITION BY departamento, sector, canal_de_registro, naturaleza
+              ORDER BY registration_month 
+              ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
+            ) AS three_month_moving_avg
+            
+          FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table) }}`;
+
+  - id: gather_mart_statistics
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      SELECT
+        table_id AS table_name,
+        ROUND(size_bytes / POW(10, 6), 2) AS size_mb,
+        row_count,
+        FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%S', TIMESTAMP_MILLIS(creation_time)) AS created_at,
+        FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%S', TIMESTAMP_MILLIS(CAST(last_modified_time AS INT64))) AS last_modified
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.__TABLES__`
+      WHERE table_id = '{{ render(vars.mart_table) }}';
+    store: true
+
+  - id: validate_data_mart
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      SELECT 
+        'Total Records' AS metric,
+        CAST(COUNT(*) AS STRING) AS value
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table) }}`
+      
+      UNION ALL
+      
+      SELECT 
+        'Date Range' AS metric,
+        CONCAT(
+          CAST(MIN(registration_month) AS STRING), 
+          ' to ', 
+          CAST(MAX(registration_month) AS STRING)
+        ) AS value
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table) }}`
+      
+      UNION ALL
+      
+      SELECT 
+        'Total Unique Companies' AS metric,
+        CAST(SUM(unique_companies) AS STRING) AS value
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table) }}`
+      
+      UNION ALL
+      
+      SELECT 
+        'Average Data Quality Score' AS metric,
+        CAST(ROUND(AVG(avg_data_quality_score), 2) AS STRING) AS value
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table) }}`
+      
+      UNION ALL
+      
+      SELECT 
+        'Departments Covered' AS metric,
+        CAST(COUNT(DISTINCT departamento) AS STRING) AS value
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table) }}`
+      
+      UNION ALL
+      
+      SELECT 
+        'Sectors Covered' AS metric,
+        CAST(COUNT(DISTINCT sector) AS STRING) AS value
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table) }}`
+      
+      ORDER BY metric;
+    store: true
+
+  - id: get_recent_trends
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      SELECT 
+        registration_month,
+        year_month,
+        SUM(unique_companies) AS total_companies,
+        ROUND(AVG(avg_data_quality_score), 2) AS avg_quality_score,
+        ROUND(AVG(three_month_moving_avg), 2) AS three_month_avg,
+        ROUND(AVG(mom_growth_pct), 2) AS avg_mom_growth,
+        ROUND(AVG(yoy_growth_pct), 2) AS avg_yoy_growth
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table) }}`
+      WHERE registration_month >= DATE_SUB(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL 12 MONTH)
+      GROUP BY registration_month, year_month
+      ORDER BY registration_month DESC
+      LIMIT 12;
+    store: true
+
+  - id: convert_statistics_to_csv
+    type: io.kestra.plugin.serdes.csv.IonToCsv
+    from: "{{ outputs.gather_mart_statistics.uri }}"
+
+  - id: convert_validation_to_csv
+    type: io.kestra.plugin.serdes.csv.IonToCsv
+    from: "{{ outputs.validate_data_mart.uri }}"
+
+  - id: convert_trends_to_csv
+    type: io.kestra.plugin.serdes.csv.IonToCsv
+    from: "{{ outputs.get_recent_trends.uri }}"
+
+  - id: log_completion
+    type: io.kestra.plugin.core.log.Log
+    message: |
+      ===== Company Analytics Data Mart Refresh Complete =====
+      Refresh Type: {{ inputs.full_refresh and 'Full' or 'Monthly Incremental' }}
+      Period: {{ render(vars.month_name) | title }} {{ inputs.year_of_interest }}
+      
+      Data mart is ready for querying at:
+      {{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table) }}
+
+  - id: send_completion_email
+    type: io.kestra.plugin.notifications.mail.MailSend
+    from: "{{ kv('SENDER_EMAIL') }}"
+    to: "{{ kv('RECIPIENT_EMAILS') }}"
+    subject: "Data Mart Refreshed - {{ render(vars.month_name) | title }} {{ inputs.year_of_interest }} ({{ inputs.full_refresh and 'Full' or 'Incremental' }})"
+    htmlTextContent: |
+      <h2>Company Analytics Data Mart Refresh Completed</h2>
+      
+      <h3>Refresh Details</h3>
+      <ul>
+        <li><strong>Refresh Type:</strong> {{ inputs.full_refresh and 'Full Refresh (Manual)' or 'Monthly Incremental Update' }}</li>
+        <li><strong>Period:</strong> {{ render(vars.month_name) | title }} {{ inputs.year_of_interest }}</li>
+        <li><strong>Date Range:</strong> {{ render(vars.start_date) }} to {{ render(vars.end_date) }}</li>
+        <li><strong>Execution Time:</strong> {{ now() }}</li>
+        <li><strong>Dataset:</strong> {{ render(vars.dataset_marts) }}</li>
+        <li><strong>Table:</strong> {{ render(vars.mart_table) }}</li>
+      </ul>
+      
+      <h3>Data Mart Features</h3>
+      <ul>
+        <li>✅ Monthly company registration metrics</li>
+        <li>✅ Data quality scores and contact completeness</li>
+        <li>✅ Company size distribution (Micro, Small, Medium, Large, Unipersonal)</li>
+        <li>✅ Registration channel breakdown (Autoregistro, Agencia)</li>
+        <li>✅ Month-over-month (MoM) growth rates</li>
+        <li>✅ Year-over-year (YoY) growth comparisons</li>
+        <li>✅ 3-month moving averages for trend analysis</li>
+        <li>✅ Cumulative totals by department</li>
+        <li>✅ Partitioned by month, clustered by channel, sector, and legal nature</li>
+      </ul>
+      
+      <h3>Sample Queries</h3>
+      <pre style="background: #f5f5f5; padding: 10px; border-radius: 5px;">
+      -- Monthly summary for {{ render(vars.month_name) | title }} {{ inputs.year_of_interest }}
+      SELECT 
+        departamento,
+        SUM(unique_companies) as total_companies,
+        ROUND(AVG(avg_data_quality_score), 2) as avg_quality,
+        ROUND(AVG(mom_growth_pct), 2) as mom_growth,
+        SUM(micro_companies) as micro,
+        SUM(small_companies) as small,
+        SUM(medium_companies) as medium,
+        SUM(large_companies) as large,
+        SUM(unipersonal_companies) as unipersonal
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table) }}`
+      WHERE year = {{ inputs.year_of_interest }}
+        AND month = {{ inputs.month_of_interest }}
+      GROUP BY 1
+      ORDER BY 2 DESC;
+
+      -- Month-over-month trend comparison
+      SELECT 
+        registration_month,
+        year_month,
+        SUM(unique_companies) as total,
+        AVG(three_month_moving_avg) as quarterly_trend,
+        AVG(mom_growth_pct) as growth_rate
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table) }}`
+      WHERE registration_month >= DATE_SUB(DATE('{{ render(vars.start_date) }}'), INTERVAL 6 MONTH)
+      GROUP BY 1, 2
+      ORDER BY 1;
+
+      -- Channel performance by month
+      SELECT 
+        canal_de_registro,
+        SUM(unique_companies) as total_companies,
+        ROUND(AVG(mom_growth_pct), 2) as avg_monthly_growth,
+        ROUND(AVG(yoy_growth_pct), 2) as year_over_year_growth
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table) }}`
+      WHERE year = {{ inputs.year_of_interest }}
+        AND month = {{ inputs.month_of_interest }}
+      GROUP BY 1
+      ORDER BY 2 DESC;
+      </pre>
+      
+      <p>See attached files for detailed statistics, validation results, and recent trends.</p>
+      
+      <p><em>The data mart is now ready for querying in BigQuery and can be connected to your BI tools.</em></p>
+    attachments:
+      - name: mart_statistics.csv
+        uri: "{{ outputs.convert_statistics_to_csv.uri }}"
+        contentType: text/csv
+      - name: validation_results.csv
+        uri: "{{ outputs.convert_validation_to_csv.uri }}"
+        contentType: text/csv
+      - name: recent_trends.csv
+        uri: "{{ outputs.convert_trends_to_csv.uri }}"
+        contentType: text/csv
+    host: "{{ kv('SMTP_SERVER') }}"
+    port: "{{ kv('SMTP_PORT') }}"
+    username: "{{ kv('GMAIL_USERNAME') }}"
+    password: "{{ kv('GMAIL_APP_PASSWORD') }}"
+    transportStrategy: SMTP_TLS
+
+triggers:
+  - id: schedule_monthly_refresh
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 3 5 * *"
+    inputs:
+      full_refresh: false
+      year_of_interest: "{{ now() | dateAdd(-1, 'MONTHS') | date('yyyy') }}"
+      month_of_interest: "{{ now() | dateAdd(-1, 'MONTHS') | date('M') | int }}"
+  
+  - id: trigger_after_gcs_load
+    type: io.kestra.plugin.core.trigger.Flow
+    description: "Automatically refresh data mart after GCS-to-BigQuery load completes"
+    inputs:
+      full_refresh: false
+      year_of_interest: "{{ trigger.outputs.year_of_interest ?? trigger.year_of_interest }}"
+      month_of_interest: "{{ trigger.outputs.month_of_interest ?? trigger.month_of_interest }}"
+    conditions:
+      - type: io.kestra.plugin.core.condition.ExecutionFlow
+        namespace: public_employment_pulse
+        flowId: companies-gcs-to-bigquery
+      - type: io.kestra.plugin.core.condition.ExecutionStatus
+        in:
+          - SUCCESS
+      - type: io.kestra.plugin.core.condition.ExecutionOutputs
+        expression: "{{ outputs.data_processed == 'empresas' }}"

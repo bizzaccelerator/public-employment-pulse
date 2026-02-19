@@ -1,0 +1,480 @@
+id: orientacion-gcs-to-bigquery-backfills
+namespace: public_employment_pulse
+
+inputs:
+  - id: data_processed
+    type: SELECT
+    description: Data of interest to load.
+    displayName: "Choose the data of interest."
+    defaults: orientacion
+    values: [ registro_hv, orientacion, intermediacion, vacantes, empresas ]
+
+  - id: load_mode
+    type: SELECT
+    description: How to load data into BigQuery.
+    displayName: "Choose load mode."
+    defaults: WRITE_APPEND
+    values: [ WRITE_APPEND, WRITE_TRUNCATE, WRITE_EMPTY ]
+
+variables:
+  month_name: "{{ trigger.date | date('MMMM') | lower }}"
+  gcs_path: "gs://employment-agency-operational-data/{{ inputs.data_processed }}/{{ trigger.date | date('YYYY') }}/{{ vars.month_name }}/orientacion_hv_{{ trigger.date | date('YYYY') }}_{{ trigger.date | date('M') }}.parquet"
+  bq_dataset: "operations_co"
+  bq_table: "{{ inputs.data_processed }}"
+
+tasks:
+  - id: log_workflow_start
+    type: io.kestra.plugin.core.log.Log
+    message: |
+      Starting BigQuery load for:
+      File: {{ render(vars.gcs_path) }}
+      Dataset: {{ render(vars.bq_dataset) }}
+      Table: {{ render(vars.bq_table) }}
+      Load Mode: {{ inputs.load_mode }}
+
+  - id: create_bigquery_dataset
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      CREATE SCHEMA IF NOT EXISTS `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}`
+      OPTIONS(
+        location='US',
+        description='Public Employment Pulse Data'
+      );
+
+  - id: create_bigquery_table
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      CREATE TABLE IF NOT EXISTS `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}` (
+        id INT64,
+        numerodocumento STRING,
+        fechaagendamiento_orientacion TIMESTAMP,
+        fechaejecucion_orientacion TIMESTAMP,
+        fechaevaluacion_orientacion TIMESTAMP,
+        orientador STRING,
+        mes_orientado INT64,
+        anio_orientado INT64,
+        fechaagendamiento_taller TIMESTAMP,
+        fechaejecucion_taller TIMESTAMP,
+        fechaevaluacion_taller TIMESTAMP,
+        tallerista STRING,
+        mes_taller INT64,
+        anio_taller INT64,
+        indicador STRING,
+        tipodireccionamiento STRING,
+        tipo_documento STRING,
+        correoelectronico STRING,
+        primernombre STRING,
+        segundonombre STRING,
+        primerapellido STRING,
+        segundoapellido STRING,
+        sexo STRING,
+        ciudad STRING,
+        departamento STRING,
+        area STRING,
+        tipo STRING,
+        subtipo STRING,
+        nombreportafolio STRING,
+        nombreconvocatoria STRING,
+        aprobacion STRING,
+        porcentajeasistencia STRING,
+        prestadornombre STRING,
+        institucionnombre STRING,
+        instituciondireccion STRING,
+        institucionmunicipio STRING,
+        instituciondepartamento STRING,
+        programagobiernosino BOOLEAN,
+        programagobierno STRING,
+        alianzasentidadesexternas STRING,
+        agencianombre STRING,
+        numerotelefono STRING,
+        programa_de_gobierno STRING,
+        condiciones_especiales STRING,
+        edad INT64,
+        rango_de_edad STRING,
+        grupos_etnicos STRING,
+        vca STRING,
+        discapacidad STRING,
+        migrante STRING,
+        vvg STRING,
+        reincorporados STRING,
+        created_at TIMESTAMP,
+        loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+      )
+      PARTITION BY DATE(fechaejecucion_orientacion)
+      CLUSTER BY departamento, mes_orientado, anio_orientado, mes_taller
+      OPTIONS(
+        description='Psychologist orientation data',
+        require_partition_filter=false
+      );
+
+  - id: load_parquet_to_bigquery
+    type: io.kestra.plugin.gcp.bigquery.LoadFromGcs
+    from: 
+      - "{{ render(vars.gcs_path) }}"
+    destinationTable: "{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}"
+    format: PARQUET
+    writeDisposition: "{{ inputs.load_mode }}"
+    autodetect: false
+    schema:
+      fields:
+        - name: id
+          type: INT64
+          mode: NULLABLE
+        - name: numerodocumento
+          type: STRING
+          mode: NULLABLE
+        - name: fechaagendamiento_orientacion
+          type: TIMESTAMP
+          mode: NULLABLE
+        - name: fechaejecucion_orientacion
+          type: TIMESTAMP
+          mode: NULLABLE
+        - name: fechaevaluacion_orientacion
+          type: TIMESTAMP
+          mode: NULLABLE
+        - name: orientador
+          type: STRING
+          mode: NULLABLE
+        - name: mes_orientado
+          type: INT64
+          mode: NULLABLE
+        - name: anio_orientado
+          type: INT64
+          mode: NULLABLE
+        - name: fechaagendamiento_taller
+          type: TIMESTAMP
+          mode: NULLABLE
+        - name: fechaejecucion_taller
+          type: TIMESTAMP
+          mode: NULLABLE
+        - name: fechaevaluacion_taller
+          type: TIMESTAMP
+          mode: NULLABLE
+        - name: tallerista
+          type: STRING
+          mode: NULLABLE
+        - name: mes_taller
+          type: INT64
+          mode: NULLABLE
+        - name: anio_taller
+          type: INT64
+          mode: NULLABLE
+        - name: indicador
+          type: STRING
+          mode: NULLABLE
+        - name: tipodireccionamiento
+          type: STRING
+          mode: NULLABLE
+        - name: tipo_documento
+          type: STRING
+          mode: NULLABLE
+        - name: correoelectronico
+          type: STRING
+          mode: NULLABLE
+        - name: primernombre
+          type: STRING
+          mode: NULLABLE
+        - name: segundonombre
+          type: STRING
+          mode: NULLABLE
+        - name: primerapellido
+          type: STRING
+          mode: NULLABLE
+        - name: segundoapellido
+          type: STRING
+          mode: NULLABLE
+        - name: sexo
+          type: STRING
+          mode: NULLABLE
+        - name: ciudad
+          type: STRING
+          mode: NULLABLE
+        - name: departamento
+          type: STRING
+          mode: NULLABLE
+        - name: area
+          type: STRING
+          mode: NULLABLE
+        - name: tipo
+          type: STRING
+          mode: NULLABLE
+        - name: subtipo
+          type: STRING
+          mode: NULLABLE
+        - name: nombreportafolio
+          type: STRING
+          mode: NULLABLE
+        - name: nombreconvocatoria
+          type: STRING
+          mode: NULLABLE
+        - name: aprobacion
+          type: STRING
+          mode: NULLABLE
+        - name: porcentajeasistencia
+          type: STRING
+          mode: NULLABLE
+        - name: prestadornombre
+          type: STRING
+          mode: NULLABLE
+        - name: institucionnombre
+          type: STRING
+          mode: NULLABLE
+        - name: instituciondireccion
+          type: STRING
+          mode: NULLABLE
+        - name: institucionmunicipio
+          type: STRING
+          mode: NULLABLE
+        - name: instituciondepartamento
+          type: STRING
+          mode: NULLABLE
+        - name: programagobiernosino
+          type: BOOL 
+          mode: NULLABLE
+        - name: programagobierno
+          type: STRING
+          mode: NULLABLE
+        - name: alianzasentidadesexternas
+          type: STRING
+          mode: NULLABLE
+        - name: agencianombre
+          type: STRING
+          mode: NULLABLE
+        - name: numerotelefono
+          type: STRING
+          mode: NULLABLE
+        - name: programa_de_gobierno
+          type: STRING
+          mode: NULLABLE
+        - name: condiciones_especiales
+          type: STRING
+          mode: NULLABLE
+        - name: edad
+          type: INT64
+          mode: NULLABLE
+        - name: rango_de_edad
+          type: STRING
+          mode: NULLABLE
+        - name: grupos_etnicos
+          type: STRING
+          mode: NULLABLE
+        - name: vca
+          type: STRING
+          mode: NULLABLE
+        - name: discapacidad
+          type: STRING
+          mode: NULLABLE
+        - name: migrante
+          type: STRING
+          mode: NULLABLE
+        - name: vvg
+          type: STRING
+          mode: NULLABLE
+        - name: reincorporados
+          type: STRING
+          mode: NULLABLE
+        - name: created_at
+          type: TIMESTAMP
+          mode: NULLABLE
+
+  - id: verify_load_count
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      SELECT 
+        COUNT(*) as total_records,
+        COUNT(DISTINCT numerodocumento) as unique_people,
+        MIN(fechaejecucion_orientacion) as earliest_orientation_date,
+        MAX(fechaejecucion_orientacion) as latest_orientation_date,
+        COUNT(DISTINCT orientador) as unique_orientadores,
+        mes_orientado,
+        anio_orientado
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE mes_orientado = {{ trigger.date | date('M') }}
+        AND anio_orientado = {{ trigger.date | date('YYYY') }}
+      GROUP BY mes_orientado, anio_orientado;
+    store: true
+
+  - id: verify_workshop_count
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      SELECT 
+        COUNT(*) as total_workshops,
+        COUNT(DISTINCT numerodocumento) as unique_people_in_workshops,
+        MIN(fechaejecucion_taller) as earliest_workshop_date,
+        MAX(fechaejecucion_taller) as latest_workshop_date,
+        COUNT(DISTINCT tallerista) as unique_talleristas,
+        mes_taller,
+        anio_taller,
+        COUNT(CASE WHEN mes_taller != mes_orientado THEN 1 END) as different_month_from_orientation,
+        COUNT(CASE WHEN mes_taller = mes_orientado THEN 1 END) as same_month_as_orientation
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE mes_taller = {{ trigger.date | date('M') }}
+        AND anio_taller = {{ trigger.date | date('YYYY') }}
+        AND fechaejecucion_taller IS NOT NULL
+      GROUP BY mes_taller, anio_taller;
+    store: true
+
+  - id: check_data_quality
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      SELECT
+        'Missing edad' as issue,
+        COUNT(*) as count
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE edad IS NULL
+        AND mes_orientado = {{ trigger.date | date('M') }}
+        AND anio_orientado = {{ trigger.date | date('YYYY') }}
+      
+      UNION ALL
+      
+      SELECT
+        'Missing sexo' as issue,
+        COUNT(*) as count
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE sexo IS NULL OR sexo = ''
+        AND mes_orientado = {{ trigger.date | date('M') }}
+        AND anio_orientado = {{ trigger.date | date('YYYY') }}
+      
+      UNION ALL
+      
+      SELECT
+        'Missing both edad and sexo' as issue,
+        COUNT(*) as count
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE (edad IS NULL AND (sexo IS NULL OR sexo = ''))
+        AND mes_orientado = {{ trigger.date | date('M') }}
+        AND anio_orientado = {{ trigger.date | date('YYYY') }}
+      
+      UNION ALL
+      
+      SELECT
+        'Missing departamento' as issue,
+        COUNT(*) as count
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE departamento IS NULL OR departamento = ''
+        AND mes_orientado = {{ trigger.date | date('M') }}
+        AND anio_orientado = {{ trigger.date | date('YYYY') }}
+      ORDER BY count DESC;
+    store: true
+
+  - id: get_monthly_statistics
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      SELECT
+        departamento,
+        COUNT(*) as total_orientaciones,
+        COUNT(DISTINCT numerodocumento) as personas_unicas_orientadas,
+        ROUND(AVG(edad), 1) as edad_promedio,
+        COUNT(CASE WHEN sexo = 'M' THEN 1 END) as hombres,
+        COUNT(CASE WHEN sexo = 'F' THEN 1 END) as mujeres
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE mes_orientado = {{ trigger.date | date('M') }}
+        AND anio_orientado = {{ trigger.date | date('YYYY') }}
+      GROUP BY departamento
+      ORDER BY total_orientaciones DESC;
+    store: true
+
+  - id: get_workshop_statistics
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      SELECT
+        departamento,
+        COUNT(*) as total_talleres,
+        COUNT(DISTINCT numerodocumento) as personas_unicas_en_talleres,
+        COUNT(DISTINCT tallerista) as talleristas_activos,
+        ROUND(AVG(CAST(porcentajeasistencia AS FLOAT64)), 1) as promedio_asistencia,
+        COUNT(CASE WHEN mes_taller = mes_orientado AND anio_taller = anio_orientado THEN 1 END) as mismo_mes_orientacion,
+        COUNT(CASE WHEN mes_taller != mes_orientado OR anio_taller != anio_orientado THEN 1 END) as diferente_mes_orientacion
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE mes_taller = {{ trigger.date | date('M') }}
+        AND anio_taller = {{ trigger.date | date('YYYY') }}
+        AND fechaejecucion_taller IS NOT NULL
+      GROUP BY departamento
+      ORDER BY total_talleres DESC;
+    store: true
+
+  - id: log_load_summary
+    type: io.kestra.plugin.core.log.Log
+    message: |
+      ===== BigQuery Load Summary =====
+      File: {{ render(vars.gcs_path) }}
+      Dataset: {{ render(vars.bq_dataset) }}
+      Table: {{ render(vars.bq_table) }}
+      Load Mode: {{ inputs.load_mode }}
+      
+      Load completed successfully. Check email for detailed statistics.
+
+  - id: convert_verification_to_csv
+    type: io.kestra.plugin.serdes.csv.IonToCsv
+    from: "{{ outputs.verify_load_count.uri }}"
+
+  - id: convert_workshop_verification_to_csv
+    type: io.kestra.plugin.serdes.csv.IonToCsv
+    from: "{{ outputs.verify_workshop_count.uri }}"
+
+  - id: convert_quality_to_csv
+    type: io.kestra.plugin.serdes.csv.IonToCsv
+    from: "{{ outputs.check_data_quality.uri }}"
+
+  - id: convert_statistics_to_csv
+    type: io.kestra.plugin.serdes.csv.IonToCsv
+    from: "{{ outputs.get_monthly_statistics.uri }}"
+
+  - id: convert_workshop_statistics_to_csv
+    type: io.kestra.plugin.serdes.csv.IonToCsv
+    from: "{{ outputs.get_workshop_statistics.uri }}"
+
+  - id: send_completion_email
+    type: io.kestra.plugin.notifications.mail.MailSend
+    from: "{{ kv('SENDER_EMAIL') }}"
+    to: "{{ kv('RECIPIENT_EMAILS') }}"
+    subject: "BigQuery Load Complete - {{ inputs.data_processed }} {{ trigger.date | date('M') }}/{{ trigger.date | date('YYYY') }}"
+    htmlTextContent: |
+      <h2>BigQuery Data Load Completed - Orientation Data</h2>
+      <p><strong>Dataset:</strong> {{ render(vars.bq_dataset) }}</p>
+      <p><strong>Table:</strong> {{ render(vars.bq_table) }}</p>
+      <p><strong>Source File:</strong> {{ render(vars.gcs_path) }}</p>
+      <p><strong>Load Mode:</strong> {{ inputs.load_mode }}</p>
+      <p><strong>Month/Year:</strong> {{ trigger.date | date('M') }}/{{ trigger.date | date('YYYY') }}</p>
+      
+      <h3>Attached Reports:</h3>
+      <ul>
+        <li><strong>orientation_load_statistics.csv</strong> - Orientation load counts, date ranges, and unique orientadores</li>
+        <li><strong>workshop_load_statistics.csv</strong> - Workshop counts, date ranges, unique talleristas, and cross-month participation</li>
+        <li><strong>data_quality.csv</strong> - Data quality issues (missing edad, sexo, departamento)</li>
+        <li><strong>orientation_statistics_by_department.csv</strong> - Orientation breakdown by department with demographics</li>
+        <li><strong>workshop_statistics_by_department.csv</strong> - Workshop breakdown by department with attendance and timing analysis</li>
+      </ul>
+      
+      <p><strong>Note:</strong> Workshop statistics include people who attended workshops in this month, regardless of when they were oriented.</p>
+      
+      <p><em>Workflow executed at: {{ now() }}</em></p>
+    attachments:
+      - name: orientation_load_statistics.csv
+        uri: "{{ outputs.convert_verification_to_csv.uri }}"
+        contentType: text/csv
+      - name: workshop_load_statistics.csv
+        uri: "{{ outputs.convert_workshop_verification_to_csv.uri }}"
+        contentType: text/csv
+      - name: data_quality.csv
+        uri: "{{ outputs.convert_quality_to_csv.uri }}"
+        contentType: text/csv
+      - name: orientation_statistics_by_department.csv
+        uri: "{{ outputs.convert_statistics_to_csv.uri }}"
+        contentType: text/csv
+      - name: workshop_statistics_by_department.csv
+        uri: "{{ outputs.convert_workshop_statistics_to_csv.uri }}"
+        contentType: text/csv
+    host: "{{ kv('SMTP_SERVER') }}"
+    port: "{{ kv('SMTP_PORT') }}"
+    username: "{{ kv('GMAIL_USERNAME') }}"
+    password: "{{ kv('GMAIL_APP_PASSWORD') }}"
+    transportStrategy: SMTP_TLS
+
+triggers:
+  - id: schedule_monthly_load
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 3 5 * *"  # Run at 3 AM on the 5th of each month
+    inputs:
+      data_processed: orientacion
+      load_mode: WRITE_APPEND

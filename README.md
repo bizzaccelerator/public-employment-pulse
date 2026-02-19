@@ -67,5 +67,5 @@ Photo: Zoom of data handling operations inside GCP.
 
 ### Tutorial to reproduce the project:
 
-The tutorials on how to setup and run this project can be found [here](https://github.com/bizzaccelerator/public-employment-pulse/wiki/Welcome-to-the-wiki).
+The tutorials on how to setup and run this project can be found [here](https://github.com/bizzaccelerator/public-employment-pulse/wiki).
 

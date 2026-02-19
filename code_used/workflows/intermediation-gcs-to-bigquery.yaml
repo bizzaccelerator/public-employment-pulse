@@ -1,0 +1,391 @@
+id: intermediation-gcs-to-bigquery
+namespace: public_employment_pulse
+
+inputs:
+  - id: data_processed
+    type: SELECT
+    description: Data of interest to load.
+    displayName: "Choose the data of interest."
+    defaults: intermediacion
+    values: [ registro_hv, orientacion, intermediacion, vacantes, empresas ]
+
+  - id: year_of_interest
+    type: SELECT
+    description: Year of data to load.
+    displayName: "Choose the year of interest."
+    defaults: "2026"
+    values: [ "2024", "2025", "2026" ]
+
+  - id: month_of_interest
+    type: INT
+    description: Month of data to load.
+    displayName: "Choose the month number of interest."
+    defaults: 1
+
+  - id: load_mode
+    type: SELECT
+    description: How to load data into BigQuery.
+    displayName: "Choose load mode."
+    defaults: WRITE_APPEND
+    values: [ WRITE_APPEND, WRITE_TRUNCATE, WRITE_EMPTY ]
+
+variables:
+  month_name: "{% set month_names = {1: 'january', 2: 'february', 3: 'march', 4: 'april', 5: 'may', 6: 'june', 7: 'july', 8: 'august', 9: 'september', 10: 'october', 11: 'november', 12: 'december'} %}{{ month_names[inputs.month_of_interest] }}"
+  gcs_path: "gs://employment-agency-operational-data/{{ inputs.data_processed }}/{{ inputs.year_of_interest }}/{{ vars.month_name }}/intermediacion_hv_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}.parquet"
+  bq_dataset: "operations_co"
+  bq_table: "{{ inputs.data_processed }}"
+
+tasks:
+  - id: log_workflow_start
+    type: io.kestra.plugin.core.log.Log
+    message: |
+      Starting BigQuery load for:
+      File: {{ render(vars.gcs_path) }}
+      Dataset: {{ render(vars.bq_dataset) }}
+      Table: {{ render(vars.bq_table) }}
+      Load Mode: {{ inputs.load_mode }}
+
+  - id: check_gcs_file_exists
+    type: io.kestra.plugin.gcp.gcs.List
+    from: "{{ render(vars.gcs_path) }}"
+
+  - id: log_file_found
+    type: io.kestra.plugin.core.log.Log
+    message: "File found: {{ render(vars.gcs_path) }}"
+
+  - id: create_bigquery_dataset
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      CREATE SCHEMA IF NOT EXISTS `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}`
+      OPTIONS(
+        location='US',
+        description='Public Employment Pulse Data'
+      );
+
+  - id: create_bigquery_table
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      CREATE TABLE IF NOT EXISTS `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}` (
+        unique_row_id STRING,
+        filename STRING,
+        item INT64,
+        mes_registro STRING,
+        convenio STRING,
+        gestion_vacante STRING,
+        poblacion STRING,
+        `no` STRING,
+        codigo_proceso STRING,
+        nombre_de_la_empresa STRING,
+        nombre_de_la_vacante STRING,
+        puestos_de_trabajo_en_plataforma INT64,
+        fecha_de_publicacion_de_la_vacante TIMESTAMP,
+        fecha_de_vencimiento_de_la_vacante TIMESTAMP,
+        hojas_de_vida_remitidas INT64,
+        fecha_envio_hojas_de_vida_a_la_empresa TIMESTAMP,
+        nombre_del_candidato STRING,
+        cedula STRING,
+        telefono STRING,
+        edad INT64,
+        rango_de_edad STRING,
+        nivel_educativo STRING,
+        formacion STRING,
+        sexo STRING,
+        barrio STRING,
+        condicion STRING,
+        gestor STRING,
+        intermediador STRING,
+        llamada_convocatoria_base_de_datos STRING,
+        observacion_intermediacion STRING,
+        observacion_gestion STRING,
+        observacion_del_candidato STRING,
+        mes_de_colocacion_en_plataforma STRING,
+        colocado INT64,
+        semana_publicacion_vacante INT64,
+        mes_publicacion_vacante STRING,
+        tipo_de_vacante STRING,
+        anio_publicacion_vacante INT64,
+        discapacidad STRING,
+        vca STRING,
+        vvg STRING,
+        migrante STRING,
+        etnias STRING,
+        reincorporados STRING,
+        created_at TIMESTAMP,
+        loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+      )
+      PARTITION BY DATE(fecha_envio_hojas_de_vida_a_la_empresa)
+      CLUSTER BY cedula, codigo_proceso
+      OPTIONS(
+        description='Intermediation employment data - person-vacancy interactions',
+        require_partition_filter=false
+      );
+
+  - id: load_parquet_to_bigquery
+    type: io.kestra.plugin.gcp.bigquery.LoadFromGcs
+    from: 
+      - "{{ render(vars.gcs_path) }}"
+    destinationTable: "{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}"
+    format: PARQUET
+    writeDisposition: "{{ inputs.load_mode }}"
+    autodetect: false
+    schema:
+      fields:
+        - name: unique_row_id
+          type: STRING
+          mode: NULLABLE
+        - name: filename
+          type: STRING
+          mode: NULLABLE
+        - name: item
+          type: INT64
+          mode: NULLABLE
+        - name: mes_registro
+          type: STRING
+          mode: NULLABLE
+        - name: convenio
+          type: STRING
+          mode: NULLABLE
+        - name: gestion_vacante
+          type: STRING
+          mode: NULLABLE
+        - name: poblacion
+          type: STRING
+          mode: NULLABLE
+        - name: "no"
+          type: STRING
+          mode: NULLABLE
+        - name: codigo_proceso
+          type: STRING
+          mode: NULLABLE
+        - name: nombre_de_la_empresa
+          type: STRING
+          mode: NULLABLE
+        - name: nombre_de_la_vacante
+          type: STRING
+          mode: NULLABLE
+        - name: puestos_de_trabajo_en_plataforma
+          type: INT64
+          mode: NULLABLE
+        - name: fecha_de_publicacion_de_la_vacante
+          type: TIMESTAMP
+          mode: NULLABLE
+        - name: fecha_de_vencimiento_de_la_vacante
+          type: TIMESTAMP
+          mode: NULLABLE
+        - name: hojas_de_vida_remitidas
+          type: INT64
+          mode: NULLABLE
+        - name: fecha_envio_hojas_de_vida_a_la_empresa
+          type: TIMESTAMP
+          mode: NULLABLE
+        - name: nombre_del_candidato
+          type: STRING
+          mode: NULLABLE
+        - name: cedula
+          type: STRING
+          mode: NULLABLE
+        - name: telefono
+          type: STRING
+          mode: NULLABLE
+        - name: edad
+          type: INT64
+          mode: NULLABLE
+        - name: rango_de_edad
+          type: STRING
+          mode: NULLABLE
+        - name: nivel_educativo
+          type: STRING
+          mode: NULLABLE
+        - name: formacion
+          type: STRING
+          mode: NULLABLE
+        - name: sexo
+          type: STRING
+          mode: NULLABLE
+        - name: barrio
+          type: STRING
+          mode: NULLABLE
+        - name: condicion
+          type: STRING
+          mode: NULLABLE
+        - name: gestor
+          type: STRING
+          mode: NULLABLE
+        - name: intermediador
+          type: STRING
+          mode: NULLABLE
+        - name: llamada_convocatoria_base_de_datos
+          type: STRING
+          mode: NULLABLE
+        - name: observacion_intermediacion
+          type: STRING
+          mode: NULLABLE
+        - name: observacion_gestion
+          type: STRING
+          mode: NULLABLE
+        - name: observacion_del_candidato
+          type: STRING
+          mode: NULLABLE
+        - name: mes_de_colocacion_en_plataforma
+          type: STRING
+          mode: NULLABLE
+        - name: colocado
+          type: INT64
+          mode: NULLABLE
+        - name: semana_publicacion_vacante
+          type: INT64
+          mode: NULLABLE
+        - name: mes_publicacion_vacante
+          type: STRING
+          mode: NULLABLE
+        - name: tipo_de_vacante
+          type: STRING
+          mode: NULLABLE
+        - name: anio_publicacion_vacante
+          type: INT64
+          mode: NULLABLE
+        - name: discapacidad
+          type: STRING
+          mode: NULLABLE
+        - name: vca
+          type: STRING
+          mode: NULLABLE
+        - name: vvg
+          type: STRING
+          mode: NULLABLE
+        - name: migrante
+          type: STRING
+          mode: NULLABLE
+        - name: etnias
+          type: STRING
+          mode: NULLABLE
+        - name: reincorporados
+          type: STRING
+          mode: NULLABLE
+        - name: created_at
+          type: TIMESTAMP
+          mode: NULLABLE
+
+  - id: verify_load_count
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      SELECT 
+        COUNT(*) as total_records,
+        COUNT(DISTINCT unique_row_id) as unique_interactions,
+        COUNT(DISTINCT cedula) as unique_people,
+        COUNT(DISTINCT codigo_proceso) as unique_vacancies,
+        MIN(fecha_envio_hojas_de_vida_a_la_empresa) as earliest_date,
+        MAX(fecha_envio_hojas_de_vida_a_la_empresa) as latest_date,
+        filename
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE filename = 'intermediacion_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}'
+      GROUP BY filename;
+    store: true
+
+  - id: check_data_quality
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      SELECT
+        'Missing edad' as issue,
+        COUNT(*) as count
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE edad IS NULL
+        AND filename = 'intermediacion_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}'
+      
+      UNION ALL
+      
+      SELECT
+        'Missing sexo' as issue,
+        COUNT(*) as count
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE sexo IS NULL OR sexo = ''
+        AND filename = 'intermediacion_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}'
+      
+      UNION ALL
+      
+      SELECT
+        'Missing cedula' as issue,
+        COUNT(*) as count
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE cedula IS NULL OR cedula = ''
+        AND filename = 'intermediacion_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}'
+      
+      UNION ALL
+      
+      SELECT
+        'Missing nombre_del_candidato' as issue,
+        COUNT(*) as count
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE nombre_del_candidato IS NULL OR nombre_del_candidato = ''
+        AND filename = 'intermediacion_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}'
+      
+      UNION ALL
+      
+      SELECT
+        'Missing codigo_proceso' as issue,
+        COUNT(*) as count
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE codigo_proceso IS NULL OR codigo_proceso = ''
+        AND filename = 'intermediacion_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}'
+      
+      ORDER BY count DESC;
+    store: true
+
+  - id: log_load_summary
+    type: io.kestra.plugin.core.log.Log
+    message: |
+      ===== BigQuery Load Summary =====
+      File: {{ render(vars.gcs_path) }}
+      Dataset: {{ render(vars.bq_dataset) }}
+      Table: {{ render(vars.bq_table) }}
+      Load Mode: {{ inputs.load_mode }}
+      
+      Load completed successfully. Check email for detailed statistics.
+
+  - id: convert_verification_to_csv
+    type: io.kestra.plugin.serdes.csv.IonToCsv
+    from: "{{ outputs.verify_load_count.uri }}"
+
+  - id: convert_quality_to_csv
+    type: io.kestra.plugin.serdes.csv.IonToCsv
+    from: "{{ outputs.check_data_quality.uri }}"
+
+  - id: send_completion_email
+    type: io.kestra.plugin.notifications.mail.MailSend
+    from: "{{ kv('SENDER_EMAIL') }}"
+    to: "{{ kv('RECIPIENT_EMAILS') }}"
+    subject: "BigQuery Load Complete - {{ inputs.data_processed }} {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}"
+    htmlTextContent: |
+      <h2>BigQuery Data Load Completed</h2>
+      <p><strong>Dataset:</strong> {{ render(vars.bq_dataset) }}</p>
+      <p><strong>Table:</strong> {{ render(vars.bq_table) }}</p>
+      <p><strong>Source File:</strong> {{ render(vars.gcs_path) }}</p>
+      <p><strong>Load Mode:</strong> {{ inputs.load_mode }}</p>
+      
+      <p>This table contains person-vacancy interactions where the same person can appear multiple times for different job vacancies.</p>
+      
+      <p>Please see attached files for load statistics and data quality summary.</p>
+      
+      <p><em>Workflow executed at: {{ now() }}</em></p>
+    attachments:
+      - name: load_statistics.csv
+        uri: "{{ outputs.convert_verification_to_csv.uri }}"
+        contentType: text/csv
+      - name: data_quality.csv
+        uri: "{{ outputs.convert_quality_to_csv.uri }}"
+        contentType: text/csv
+    host: "{{ kv('SMTP_SERVER') }}"
+    port: "{{ kv('SMTP_PORT') }}"
+    username: "{{ kv('GMAIL_USERNAME') }}"
+    password: "{{ kv('GMAIL_APP_PASSWORD') }}"
+    transportStrategy: SMTP_TLS
+
+triggers:
+  - id: schedule_monthly_load
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 3 6 * *"  # Run at 3 AM on the 6th of each month
+    inputs:
+      data_processed: intermediacion
+      year_of_interest: "{{ now() | date('yyyy') }}"
+      month_of_interest: "{{ now() | date('M') | int }}"
+      load_mode: WRITE_APPEND

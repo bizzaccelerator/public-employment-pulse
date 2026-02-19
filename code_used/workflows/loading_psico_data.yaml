@@ -1,0 +1,429 @@
+id: psico-raw-data-pipeline
+namespace: public_employment_pulse
+
+inputs:
+  - id: data_processed
+    type: SELECT
+    description: Data of interest processed.
+    displayName: "Choose the data of interest."
+    defaults: orientacion
+    values: [ registro_hv, orientacion, intermediacion, vacantes, empresas ]
+
+  - id: year_of_interest
+    type: SELECT
+    description: Year of data to process.
+    displayName: "Choose the year of interest."
+    defaults: "2026"
+    values: [ "2024", "2025", "2026" ]
+
+  - id: month_of_interest
+    type: INT
+    description: Month of data to process.
+    displayName: "Choose the month number of interest."
+    defaults: 1
+    
+variables:
+  staging_table: "public.{{inputs.data_processed}}_staging"
+  table: "public.{{inputs.data_processed}}"
+  file: "{{inputs.data_processed}}_{{ inputs.year_of_interest}}_{{inputs.month_of_interest}}"
+  month_name: "{% set month_names = {1: 'january', 2: 'february', 3: 'march', 4: 'april', 5: 'may', 6: 'june', 7: 'july', 8: 'august', 9: 'september', 10: 'october', 11: 'november', 12: 'december'} %}{{ month_names[inputs.month_of_interest] }}"
+  month_padded: "{{ '%02d' | format(inputs.month_of_interest) }}"
+
+tasks:
+  - id: download_registries_file
+    type: io.kestra.plugin.gcp.gcs.Download
+    from: gs://operations-raw-data_public-employment-pulse/BD_Registro_2024_2025_2026_acumulado.xlsx
+
+  - id: download_psico_sise_file
+    type: io.kestra.plugin.gcp.gcs.Download
+    from: gs://operations-raw-data_public-employment-pulse/Indicadores_orientacion_SISE_2024-2025-2026.xlsx
+
+  - id: download_psico_office_file
+    type: io.kestra.plugin.gcp.gcs.Download
+    from: gs://operations-raw-data_public-employment-pulse/Registro de Orientación Ocupacional a Buscadores de Empleo {{inputs.year_of_interest}}.xlsx
+
+  - id: reading_monthly_registries
+    type: io.kestra.plugin.scripts.python.Commands
+    docker:
+      image: python:3.11-slim
+    description: "identifying the data of people attended by psicologist in {{ vars.month_name }}"
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    namespaceFiles:
+      enabled: true
+      include:
+        - "orientacion_hv.py"
+    beforeCommands:
+      - pip install pandas numpy openpyxl pyarrow fastparquet
+    inputFiles:
+      sise_psico: '{{ outputs.download_psico_sise_file.uri }}'
+      registries: '{{ outputs.download_registries_file.uri }}'
+      psicologist: '{{ outputs.download_psico_office_file.uri }}'
+    env:
+      MONTH: "{{ inputs.month_of_interest }}"
+      YEAR: "{{ inputs.year_of_interest }}"
+    commands:
+      - "python orientacion_hv.py"
+    outputFiles:
+      - "*.parquet"
+      - "psico_count.txt"
+      - "workshop_count.txt"
+  
+  - id: log_completion
+    type: io.kestra.core.tasks.log.Log
+    message: "Excel files processed successfully"
+  
+  - id: drop_tables_if_exists
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      DROP TABLE IF EXISTS {{render(vars.staging_table)}};
+      DROP TABLE IF EXISTS {{render(vars.table)}};
+  
+  - id: create_psico_tables
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      -- Create main table if not exists
+      CREATE TABLE IF NOT EXISTS {{render(vars.table)}} (
+          id SERIAL PRIMARY KEY,
+          numerodocumento VARCHAR(50),
+          fechaagendamiento_orientacion TIMESTAMP,
+          fechaejecucion_orientacion TIMESTAMP,
+          fechaevaluacion_orientacion TIMESTAMP,
+          orientador VARCHAR(200),
+          mes_orientado INTEGER,
+          anio_orientado INTEGER,
+          fechaagendamiento_taller TIMESTAMP,
+          fechaejecucion_taller TIMESTAMP,
+          fechaevaluacion_taller TIMESTAMP,
+          tallerista VARCHAR(200),
+          mes_taller INTEGER,
+          anio_taller INTEGER,
+          indicador VARCHAR(100),
+          tipodireccionamiento VARCHAR(100),
+          tipodocumento VARCHAR(50),
+          correoelectronico VARCHAR(255),
+          primernombre VARCHAR(100),
+          segundonombre VARCHAR(100),
+          primerapellido VARCHAR(100),
+          segundoapellido VARCHAR(100),
+          sexo VARCHAR(20),
+          ciudad VARCHAR(100),
+          departamento VARCHAR(100),
+          area VARCHAR(100),
+          tipo VARCHAR(100),
+          subtipo VARCHAR(100),
+          nombreportafolio VARCHAR(200),
+          nombreconvocatoria VARCHAR(200),
+          aprobacion VARCHAR(50),
+          porcentajeasistencia NUMERIC(5,2),
+          prestadornombre VARCHAR(200),
+          institucionnombre VARCHAR(200),
+          instituciondireccion TEXT,
+          institucionmunicipio VARCHAR(100),
+          instituciondepartamento VARCHAR(100),
+          programagobiernosino BOOLEAN,
+          programagobierno VARCHAR(200),
+          alianzasentidadesexternas TEXT,
+          agencianombre VARCHAR(200),
+          numerotelefono VARCHAR(20),
+          programa_de_gobierno VARCHAR(200),
+          condiciones_especiales TEXT,
+          edad INTEGER,
+          rango_de_edad VARCHAR(50),
+          grupos_etnicos VARCHAR(100),
+          vca VARCHAR(100),
+          discapacidad VARCHAR(100),
+          migrante VARCHAR(100),
+          vvg VARCHAR(100),
+          reincorporados VARCHAR(100),
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+      
+      -- Create staging table
+      CREATE TABLE IF NOT EXISTS {{render(vars.staging_table)}} (
+          LIKE {{render(vars.table)}} INCLUDING ALL
+      );
+  
+  - id: load_data_to_staging
+    type: io.kestra.plugin.scripts.python.Script
+    docker:
+      image: python:3.11-slim
+    beforeCommands:
+      - pip install pandas sqlalchemy psycopg2-binary pyarrow fastparquet
+    inputFiles:
+      data_file: "{{ outputs.reading_monthly_registries.outputFiles['orientados_'~ inputs.year_of_interest ~'_'~ inputs.month_of_interest ~'.parquet'] }}"
+    env:
+      DB_HOST: "{{ kv('POSTGRES_HOST') }}"
+      DB_PORT: "{{ kv('POSTGRES_PORT') }}"
+      DB_NAME: "{{ kv('POSTGRES_DB') }}"
+      DB_USER: "{{ kv('POSTGRES_USER') }}"
+      DB_PASSWORD: "{{ kv('POSTGRES_PASSWORD') }}"
+    script: |
+        import pandas as pd
+        import numpy as np
+        from sqlalchemy import create_engine
+        import os
+        
+        # Connection
+        connection_string = f"postgresql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT', '5432')}/{os.getenv('DB_NAME')}"
+        engine = create_engine(connection_string)
+        
+        # Read parquet
+        df = pd.read_parquet('data_file')
+        
+        print(f"Original columns: {list(df.columns)}")
+        
+        # Clean column names - map from actual parquet columns to database columns
+        column_mapping = {
+            'numerodocumento': 'numerodocumento', 
+            'fechaagendamiento_orientacion': 'fechaagendamiento_orientacion',
+            'fechaejecucion_orientacion': 'fechaejecucion_orientacion', 
+            'fechaevaluacion_orientacion': 'fechaevaluacion_orientacion',
+            'orientador': 'orientador', 
+            'mes_orientado': 'mes_orientado', 
+            'año_orientado': 'anio_orientado',
+            'fechaagendamiento_taller': 'fechaagendamiento_taller', 
+            'fechaejecucion_taller': 'fechaejecucion_taller',
+            'fechaevaluacion_taller': 'fechaevaluacion_taller', 
+            'tallerista': 'tallerista', 
+            'mes_taller': 'mes_taller', 
+            'año_taller': 'anio_taller',
+            'indicador': 'indicador', 
+            'tipodireccionamiento': 'tipodireccionamiento', 
+            'tipodocumento': 'tipodocumento',
+            'correoelectronico': 'correoelectronico', 
+            'primernombre': 'primernombre', 
+            'segundonombre': 'segundonombre', 
+            'primerapellido': 'primerapellido',
+            'segundoapellido': 'segundoapellido', 
+            'sexo': 'sexo', 
+            'ciudad': 'ciudad', 
+            'departamento': 'departamento', 
+            'area': 'area', 
+            'tipo': 'tipo',
+            'subtipo': 'subtipo', 
+            'nombreportafolio': 'nombreportafolio', 
+            'nombreconvocatoria': 'nombreconvocatoria', 
+            'aprobacion': 'aprobacion',
+            'porcentajeasistencia': 'porcentajeasistencia', 
+            'prestadornombre': 'prestadornombre', 
+            'institucionnombre': 'institucionnombre',
+            'instituciondireccion': 'instituciondireccion', 
+            'institucionmunicipio': 'institucionmunicipio',
+            'instituciondepartamento': 'instituciondepartamento', 
+            'programagobiernosino': 'programagobiernosino', 
+            'programagobierno': 'programagobierno',
+            'alianzasentidadesexternas': 'alianzasentidadesexternas', 
+            'agencianombre': 'agencianombre', 
+            'numerotelefono': 'numerotelefono',
+            'programa_de_gobierno': 'programa_de_gobierno', 
+            'condiciones_especiales': 'condiciones_especiales', 
+            'edad': 'edad',
+            'rango_de_edad': 'rango_de_edad', 
+            'grupos_etnicos': 'grupos_etnicos', 
+            'vca': 'vca', 
+            'discapacidad': 'discapacidad', 
+            'migrante': 'migrante',
+            'vvg': 'vvg', 
+            'reincorporados': 'reincorporados'
+        }
+        
+        # Rename columns
+        df = df.rename(columns=column_mapping)
+        
+        # Convert date columns with proper format
+        date_columns = ['fechaagendamiento_orientacion', 'fechaejecucion_orientacion', 'fechaevaluacion_orientacion', 'fechaagendamiento_taller', 'fechaejecucion_taller', 'fechaevaluacion_taller']
+        for col in date_columns:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], format='mixed', dayfirst=True, errors='coerce')
+        
+        # Handle numeric columns
+        numeric_columns = ['edad', 'mes_orientado', 'anio_orientado', 'mes_taller', 'anio_taller', 'porcentajeasistencia', 'edad']
+        for col in numeric_columns:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # CRITICAL: Convert any remaining object/array columns to strings
+        for col in df.columns:
+            if df[col].dtype == 'object':
+                # Check if column contains arrays/lists
+                if df[col].apply(lambda x: isinstance(x, (list, np.ndarray))).any():
+                    df[col] = df[col].apply(lambda x: str(x) if isinstance(x, (list, np.ndarray)) else x)
+        
+        # Replace numpy NaN with None for proper NULL insertion
+        df = df.replace({np.nan: None})
+        
+        print(f"Loaded {len(df)} rows from parquet")
+        print(f"Mapped columns: {list(df.columns)}")
+        print(f"Data types: {df.dtypes.to_dict()}")
+        
+        # Load data into staging table
+        df.to_sql(
+            'orientacion_staging',
+            engine,
+            if_exists='append',
+            index=False,
+            method='multi',
+            chunksize=100
+        )
+        
+        print(f"Successfully loaded {len(df)} rows to staging table")
+  
+  - id: alter_psico_tables_add_columns
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      ALTER TABLE {{render(vars.staging_table)}} 
+      ADD COLUMN IF NOT EXISTS unique_row_id VARCHAR(32),
+      ADD COLUMN IF NOT EXISTS filename VARCHAR(255);
+
+      ALTER TABLE {{render(vars.table)}} 
+      ADD COLUMN IF NOT EXISTS unique_row_id VARCHAR(32),
+      ADD COLUMN IF NOT EXISTS filename VARCHAR(255);
+  
+  - id: data_table_add_unique_id_and_filename
+    type: io.kestra.plugin.jdbc.postgresql.Queries
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      UPDATE {{render(vars.staging_table)}}
+      SET 
+        unique_row_id = md5(
+          COALESCE(numerodocumento, '') ||
+          COALESCE(primerapellido, '') || 
+          COALESCE(primernombre, '') || 
+          COALESCE(fechaejecucion_orientacion::text, '') || 
+          COALESCE(numerotelefono, '')
+        ),
+        filename = '{{render(vars.file)}}';
+
+  - id: log_staging_complete
+    type: io.kestra.core.tasks.log.Log
+    message: "Data loaded to staging table successfully"
+
+  - id: identify_psico_incomplete_data
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      SELECT 
+        unique_row_id, 
+        numerodocumento,
+        CASE 
+          WHEN edad IS NULL THEN 'edad'
+          WHEN sexo IS NULL THEN 'sexo'
+          WHEN edad IS NULL AND sexo IS NULL THEN 'edad y sexo'
+        END AS missing_field
+      FROM orientacion_staging
+      WHERE edad IS NULL OR sexo IS NULL;
+    fetchType: STORE
+  
+  - id: convert_incomplete_to_csv
+    type: "io.kestra.plugin.serdes.csv.IonToCsv"
+    from: "{{ outputs.identify_psico_incomplete_data.uri }}"
+  
+  - id: send_email_with_attachment
+    type: io.kestra.plugin.notifications.mail.MailSend
+    from: "{{ kv('SENDER_EMAIL') }}"
+    to: "{{ kv('RECIPIENT_EMAILS') }}"
+    subject: "Incomplete Data Report - {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}"
+    htmlTextContent: |
+      <h2>Incomplete Psico Data Report</h2>
+      <p>Please find attached the incomplete data report for <strong>{{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}</strong>.</p>
+      <p><strong>Total of people attended by psicologist this month is:</strong> {{ read(outputs.reading_monthly_registries.outputFiles['psico_count.txt']) }}</p>
+      <p><strong>Total of people doing workspsshops this month is:</strong> {{ read(outputs.reading_monthly_registries.outputFiles['workshop_count.txt']) }}</p>
+      <p><strong>Total records with missing age or gender field:</strong> {{ outputs.identify_psico_incomplete_data.size }}</p>
+      <p>Please review and take appropriate action.</p>
+    attachments:
+      - name: incomplete_psico_data_{{ inputs.month_of_interest }}_{{ inputs.year_of_interest }}.csv
+        uri: "{{ outputs.convert_incomplete_to_csv.uri }}"
+        contentType: text/csv
+    host: "{{ kv('SMTP_SERVER') }}"
+    port: "{{ kv('SMTP_PORT') }}"
+    username: "{{ kv('GMAIL_USERNAME') }}"
+    password: "{{ kv('GMAIL_APP_PASSWORD') }}"
+    transportStrategy: SMTP_TLS
+  
+  - id: query_monthly_data_to_upload
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      SELECT
+        id,
+        COALESCE(numerodocumento, '') as numerodocumento,
+        fechaagendamiento_orientacion,
+        fechaejecucion_orientacion,
+        fechaevaluacion_orientacion,
+        COALESCE(orientador, '') as orientador,
+        mes_orientado,
+        anio_orientado,
+        fechaagendamiento_taller,
+        fechaejecucion_taller,
+        fechaevaluacion_taller,
+        COALESCE(tallerista, '') as tallerista,
+        mes_taller,
+        anio_taller,
+        COALESCE(indicador, '') as indicador,
+        COALESCE(tipodireccionamiento, '') as tipodireccionamiento,
+        COALESCE(tipodocumento, '') as tipodocumento,
+        COALESCE(correoelectronico, '') as correoelectronico,
+        COALESCE(primernombre, '') as primernombre,
+        COALESCE(segundonombre, '') as segundonombre,
+        COALESCE(primerapellido, '') as primerapellido,
+        COALESCE(segundoapellido, '') as segundoapellido,
+        COALESCE(sexo, '') as sexo,
+        COALESCE(ciudad, '') as ciudad,
+        COALESCE(departamento, '') as departamento,
+        COALESCE(area, '') as area,
+        COALESCE(tipo, '') as tipo,
+        COALESCE(subtipo, '') as subtipo,
+        COALESCE(nombreportafolio, '') as nombreportafolio,
+        COALESCE(nombreconvocatoria, '') as nombreconvocatoria,
+        COALESCE(aprobacion, '') as aprobacion,
+        porcentajeasistencia,
+        COALESCE(prestadornombre, '') as prestadornombre,
+        COALESCE(institucionnombre, '') as institucionnombre,
+        COALESCE(instituciondireccion, '') as instituciondireccion,
+        COALESCE(institucionmunicipio, '') as institucionmunicipio,
+        COALESCE(instituciondepartamento, '') as instituciondepartamento,
+        programagobiernosino,
+        COALESCE(programagobierno, '') as programagobierno,
+        COALESCE(alianzasentidadesexternas, '') as alianzasentidadesexternas,
+        COALESCE(agencianombre, '') as agencianombre,
+        COALESCE(numerotelefono, '') as numerotelefono,
+        COALESCE(programa_de_gobierno, '') as programa_de_gobierno,
+        COALESCE(condiciones_especiales, '') as condiciones_especiales,
+        edad,
+        COALESCE(rango_de_edad, '') as rango_de_edad,
+        COALESCE(grupos_etnicos, '') as grupos_etnicos,
+        COALESCE(vca, '') as vca,
+        COALESCE(discapacidad, '') as discapacidad,
+        COALESCE(migrante, '') as migrante,
+        COALESCE(vvg, '') as vvg,
+        COALESCE(reincorporados, '') as reincorporados,
+        created_at
+      FROM {{render(vars.staging_table)}}
+      WHERE mes_orientado = {{ inputs.month_of_interest }} 
+        AND anio_orientado = {{ inputs.year_of_interest }};
+    store: true
+    
+  - id: convert_monthly_data_to_parquet
+    type: io.kestra.plugin.serdes.parquet.IonToParquet
+    from: "{{ outputs.query_monthly_data_to_upload.uri }}"
+  
+  - id: upload_monthly_data_to_gcs
+    type: io.kestra.plugin.gcp.gcs.Upload
+    from: "{{ outputs.convert_monthly_data_to_parquet.uri }}"
+    to: "gs://employment-agency-operational-data/{{ inputs.data_processed }}/{{ inputs.year_of_interest }}/{{ vars.month_name }}/orientacion_hv_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}.parquet"

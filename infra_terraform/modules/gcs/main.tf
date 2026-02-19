@@ -24,12 +24,7 @@ resource "google_storage_bucket" "data-lake-bucket" {
   force_destroy = true
 }
 
-# DWH
-resource "google_bigquery_dataset" "dataset" {
-  dataset_id = var.BQ_DATASET
-  project    = var.project_id
-  location   = var.location
-}
+
 
 # Kestra bucket
 resource "google_storage_bucket" "kestra_bucket" {

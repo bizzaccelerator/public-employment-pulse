@@ -1,0 +1,686 @@
+id: refresh-intermediation-analytics-mart
+namespace: public_employment_pulse
+
+description: |
+  Transform intermediation data from operations_co.intermediacion to an analytics-ready fact table.
+  Supports both full refresh (recreate entire table) and incremental monthly updates.
+
+inputs:
+  - id: full_refresh
+    type: BOOLEAN
+    description: If true, recreates the data mart from scratch (use only when required)
+    displayName: "Full Refresh? (Manual Override)"
+    defaults: false
+
+  - id: year_of_interest
+    type: SELECT
+    description: Year of data to process
+    displayName: "Choose the year of interest."
+    defaults: "2026"
+    values: [ "2024", "2025", "2026" ]
+
+  - id: month_of_interest
+    type: INT
+    description: Month of data to process (1-12)
+    displayName: "Choose the month number of interest."
+    defaults: 1
+    min: 1
+    max: 12
+    
+variables:
+  source_dataset: "operations_co"
+  source_table: "intermediacion"
+  project_id: "{{ kv('GCP_PROJECT_ID') }}"
+  dataset_id: "data_marts"
+  fact_table: "fact_intermediacion_laboral"
+  month_name: "{% set month_names = {1: 'january', 2: 'february', 3: 'march', 4: 'april', 5: 'may', 6: 'june', 7: 'july', 8: 'august', 9: 'september', 10: 'october', 11: 'november', 12: 'december'} %}{{ month_names[inputs.month_of_interest] }}"
+  month_padded: "{% if inputs.month_of_interest < 10 %}0{{ inputs.month_of_interest }}{% else %}{{ inputs.month_of_interest }}{% endif %}"
+  start_date: "{{ inputs.year_of_interest }}-{{ render(vars.month_padded) }}-01"
+  end_date: "DATE_ADD(DATE('{{ inputs.year_of_interest }}-{{ render(vars.month_padded) }}-01'), INTERVAL 1 MONTH)"
+
+tasks:
+  - id: log_start
+    type: io.kestra.plugin.core.log.Log
+    message: |
+      Starting Intermediation Labor Analytics Data Mart Refresh
+      Mode: {{ inputs.full_refresh and 'Full Refresh (Manual)' or 'Monthly Incremental Refresh' }}
+      Period: {{ render(vars.month_name) | title }} {{ inputs.year_of_interest }}
+      Date Range: {{ render(vars.start_date) }} to {{ render(vars.end_date) }}
+      Source: {{ vars.project_id }}.{{ vars.source_dataset }}.{{ vars.source_table }}
+      Destination: {{ vars.project_id }}.{{ vars.dataset_id }}.{{ vars.fact_table }}
+
+  - id: create_bigquery_dataset
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      CREATE SCHEMA IF NOT EXISTS `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}`
+      OPTIONS(
+        location='US',
+        description='Analytics-ready data marts for intermediation labor data'
+      );
+
+  - id: refresh_decision
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{ inputs.full_refresh }}"
+    then:
+      - id: refresh_full
+        type: io.kestra.plugin.gcp.bigquery.Query
+        sql: |
+          -- Full refresh: recreate entire fact table from all available data
+          CREATE OR REPLACE TABLE `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}`
+          PARTITION BY DATE_TRUNC(fecha_envio_hv, MONTH)
+          CLUSTER BY sexo, month_publicacion_vacante, month_colocacion, colocado
+          OPTIONS(
+            description='Fact table for labor intermediation analytics with full history - monthly partitions',
+            require_partition_filter=true,
+            labels=[("domain", "employment"), ("refresh_type", "full")]
+          )
+          AS
+          SELECT
+            unique_row_id as fact_id,
+            unique_row_id,
+            cedula,
+            codigo_proceso,
+            
+            -- Date dimensions (already TIMESTAMP in source)
+            fecha_de_publicacion_de_la_vacante as fecha_publicacion_vacante,
+            fecha_de_vencimiento_de_la_vacante as fecha_vencimiento_vacante,
+            fecha_envio_hojas_de_vida_a_la_empresa as fecha_envio_hv,
+            CASE 
+              WHEN colocado = 1 THEN fecha_envio_hojas_de_vida_a_la_empresa 
+              ELSE NULL 
+            END as fecha_colocacion,
+            
+            -- Dimension keys (MD5 hashes)
+            TO_HEX(MD5(COALESCE(nombre_de_la_empresa, 'UNKNOWN'))) as empresa_id,
+            TO_HEX(MD5(CONCAT(
+              COALESCE(codigo_proceso, ''), 
+              '|', 
+              COALESCE(nombre_de_la_vacante, '')
+            ))) as vacante_id,
+            TO_HEX(MD5(CONCAT(
+              COALESCE(cedula, ''), 
+              '|', 
+              COALESCE(nombre_del_candidato, '')
+            ))) as candidato_id,
+            TO_HEX(MD5(COALESCE(gestor, 'UNKNOWN'))) as gestor_id,
+            TO_HEX(MD5(COALESCE(intermediador, 'UNKNOWN'))) as intermediador_id,
+            
+            -- Degenerate dimensions
+            mes_registro,
+            convenio,
+            gestion_vacante,
+            poblacion,
+            tipo_de_vacante as tipo_vacante,
+            nivel_educativo,
+            rango_de_edad as rango_edad,
+            sexo,
+            barrio,
+            condicion,
+            llamada_convocatoria_base_de_datos as llamada_convocatoria_base_datos,
+            
+            -- Boolean flags (converting string indicators to boolean)
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(discapacidad, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno') 
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_discapacidad,
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(vca, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno') 
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_vca,
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(vvg, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno') 
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_vvg,
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(migrante, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno') 
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_migrante,
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(etnias, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno') 
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_etnias,
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(reincorporados, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno') 
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_reincorporado,
+            
+            -- Measures (already correct types in source)
+            puestos_de_trabajo_en_plataforma as puestos_trabajo_plataforma,
+            hojas_de_vida_remitidas as hojas_vida_remitidas,
+            edad as edad_candidato,
+            semana_publicacion_vacante as semana_publicacion,
+            mes_publicacion_vacante,
+            anio_publicacion_vacante as anio_publicacion,
+            COALESCE(colocado, 0) as colocado,
+            
+            -- Textual attributes
+            nombre_de_la_empresa as nombre_empresa,
+            nombre_de_la_vacante as nombre_vacante,
+            nombre_del_candidato as nombre_candidato,
+            formacion,
+            telefono,
+            COALESCE(observacion_intermediacion, '') as observacion_intermediacion,
+            COALESCE(observacion_gestion, '') as observacion_gestion,
+            COALESCE(observacion_del_candidato, '') as observacion_candidato,
+            
+            -- Metadata
+            filename,
+            CURRENT_TIMESTAMP() as fecha_carga,
+            
+            -- Partitioning columns
+            EXTRACT(YEAR FROM fecha_envio_hojas_de_vida_a_la_empresa) as year,
+            EXTRACT(MONTH FROM fecha_envio_hojas_de_vida_a_la_empresa) as month,
+            
+            -- Clustering-optimized month columns (INT64 for cheap filtering)
+            EXTRACT(MONTH FROM fecha_de_publicacion_de_la_vacante) as month_publicacion_vacante,
+            CASE 
+              WHEN mes_de_colocacion_en_plataforma IS NOT NULL 
+              THEN CAST(
+                CASE 
+                  WHEN LOWER(mes_de_colocacion_en_plataforma) = 'enero' THEN 1
+                  WHEN LOWER(mes_de_colocacion_en_plataforma) = 'febrero' THEN 2
+                  WHEN LOWER(mes_de_colocacion_en_plataforma) = 'marzo' THEN 3
+                  WHEN LOWER(mes_de_colocacion_en_plataforma) = 'abril' THEN 4
+                  WHEN LOWER(mes_de_colocacion_en_plataforma) = 'mayo' THEN 5
+                  WHEN LOWER(mes_de_colocacion_en_plataforma) = 'junio' THEN 6
+                  WHEN LOWER(mes_de_colocacion_en_plataforma) = 'julio' THEN 7
+                  WHEN LOWER(mes_de_colocacion_en_plataforma) = 'agosto' THEN 8
+                  WHEN LOWER(mes_de_colocacion_en_plataforma) = 'septiembre' THEN 9
+                  WHEN LOWER(mes_de_colocacion_en_plataforma) = 'octubre' THEN 10
+                  WHEN LOWER(mes_de_colocacion_en_plataforma) = 'noviembre' THEN 11
+                  WHEN LOWER(mes_de_colocacion_en_plataforma) = 'diciembre' THEN 12
+                  ELSE NULL
+                END AS INT64
+              )
+              ELSE NULL
+            END as month_colocacion
+            
+          FROM `{{ render(vars.project_id) }}.{{ render(vars.source_dataset) }}.{{ render(vars.source_table) }}`
+          WHERE fecha_envio_hojas_de_vida_a_la_empresa IS NOT NULL;
+    else:
+      - id: ensure_fact_table_exists
+        type: io.kestra.plugin.gcp.bigquery.Query
+        sql: |
+          -- Ensure fact table exists before incremental update
+          CREATE TABLE IF NOT EXISTS `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}` (
+            fact_id STRING NOT NULL,
+            unique_row_id STRING,
+            cedula STRING,
+            codigo_proceso STRING,
+            fecha_publicacion_vacante TIMESTAMP,
+            fecha_vencimiento_vacante TIMESTAMP,
+            fecha_envio_hv TIMESTAMP,
+            fecha_colocacion TIMESTAMP,
+            empresa_id STRING,
+            vacante_id STRING,
+            candidato_id STRING,
+            gestor_id STRING,
+            intermediador_id STRING,
+            mes_registro STRING,
+            convenio STRING,
+            gestion_vacante STRING,
+            poblacion STRING,
+            tipo_vacante STRING,
+            nivel_educativo STRING,
+            rango_edad STRING,
+            sexo STRING,
+            barrio STRING,
+            condicion STRING,
+            llamada_convocatoria_base_datos STRING,
+            es_discapacidad BOOL,
+            es_vca BOOL,
+            es_vvg BOOL,
+            es_migrante BOOL,
+            es_etnias BOOL,
+            es_reincorporado BOOL,
+            puestos_trabajo_plataforma INT64,
+            hojas_vida_remitidas INT64,
+            edad_candidato INT64,
+            semana_publicacion INT64,
+            mes_publicacion_vacante STRING,
+            anio_publicacion INT64,
+            colocado INT64,
+            nombre_empresa STRING,
+            nombre_vacante STRING,
+            nombre_candidato STRING,
+            formacion STRING,
+            telefono STRING,
+            observacion_intermediacion STRING,
+            observacion_gestion STRING,
+            observacion_candidato STRING,
+            filename STRING,
+            fecha_carga TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+            year INT64 NOT NULL,
+            month INT64 NOT NULL,
+            month_publicacion_vacante INT64,
+            month_colocacion INT64
+          )
+          PARTITION BY DATE_TRUNC(fecha_envio_hv, MONTH)
+          CLUSTER BY sexo, month_publicacion_vacante, month_colocacion, colocado
+          OPTIONS(
+            description='Fact table for labor intermediation analytics - monthly partitions',
+            require_partition_filter=true
+          );
+
+      - id: refresh_incremental
+        type: io.kestra.plugin.gcp.bigquery.Query
+        sql: |
+          -- Monthly incremental refresh: delete and insert data for the specified month
+          DELETE FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}`
+          WHERE DATE_TRUNC(DATE(fecha_envio_hv), MONTH) = DATE('{{ render(vars.start_date) }}');
+          
+          INSERT INTO `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}` (
+            fact_id,
+            unique_row_id,
+            cedula,
+            codigo_proceso,
+            fecha_publicacion_vacante,
+            fecha_vencimiento_vacante,
+            fecha_envio_hv,
+            fecha_colocacion,
+            empresa_id,
+            vacante_id,
+            candidato_id,
+            gestor_id,
+            intermediador_id,
+            mes_registro,
+            convenio,
+            gestion_vacante,
+            poblacion,
+            tipo_vacante,
+            nivel_educativo,
+            rango_edad,
+            sexo,
+            barrio,
+            condicion,
+            llamada_convocatoria_base_datos,
+            es_discapacidad,
+            es_vca,
+            es_vvg,
+            es_migrante,
+            es_etnias,
+            es_reincorporado,
+            puestos_trabajo_plataforma,
+            hojas_vida_remitidas,
+            edad_candidato,
+            semana_publicacion,
+            mes_publicacion_vacante,
+            anio_publicacion,
+            colocado,
+            nombre_empresa,
+            nombre_vacante,
+            nombre_candidato,
+            formacion,
+            telefono,
+            observacion_intermediacion,
+            observacion_gestion,
+            observacion_candidato,
+            filename,
+            fecha_carga,
+            year,
+            month,
+            month_publicacion_vacante,
+            month_colocacion
+          )
+          SELECT
+            unique_row_id as fact_id,
+            unique_row_id,
+            cedula,
+            codigo_proceso,
+            
+            -- Date dimensions (already TIMESTAMP in source)
+            fecha_de_publicacion_de_la_vacante as fecha_publicacion_vacante,
+            fecha_de_vencimiento_de_la_vacante as fecha_vencimiento_vacante,
+            fecha_envio_hojas_de_vida_a_la_empresa as fecha_envio_hv,
+            CASE 
+              WHEN colocado = 1 THEN fecha_envio_hojas_de_vida_a_la_empresa 
+              ELSE NULL 
+            END as fecha_colocacion,
+            
+            -- Dimension keys (MD5 hashes)
+            TO_HEX(MD5(COALESCE(nombre_de_la_empresa, 'UNKNOWN'))) as empresa_id,
+            TO_HEX(MD5(CONCAT(
+              COALESCE(codigo_proceso, ''), 
+              '|', 
+              COALESCE(nombre_de_la_vacante, '')
+            ))) as vacante_id,
+            TO_HEX(MD5(CONCAT(
+              COALESCE(cedula, ''), 
+              '|', 
+              COALESCE(nombre_del_candidato, '')
+            ))) as candidato_id,
+            TO_HEX(MD5(COALESCE(gestor, 'UNKNOWN'))) as gestor_id,
+            TO_HEX(MD5(COALESCE(intermediador, 'UNKNOWN'))) as intermediador_id,
+            
+            -- Degenerate dimensions
+            mes_registro,
+            convenio,
+            gestion_vacante,
+            poblacion,
+            tipo_de_vacante as tipo_vacante,
+            nivel_educativo,
+            rango_de_edad as rango_edad,
+            sexo,
+            barrio,
+            condicion,
+            llamada_convocatoria_base_de_datos as llamada_convocatoria_base_datos,
+            
+            -- Boolean flags (converting string indicators to boolean)
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(discapacidad, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno') 
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_discapacidad,
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(vca, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno') 
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_vca,
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(vvg, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno') 
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_vvg,
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(migrante, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno') 
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_migrante,
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(etnias, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno') 
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_etnias,
+            CASE 
+              WHEN LOWER(TRIM(COALESCE(reincorporados, ''))) NOT IN ('', 'no', 'n/a', 'na', 'ninguna', 'ninguno') 
+              THEN TRUE 
+              ELSE FALSE 
+            END as es_reincorporado,
+            
+            -- Measures (already correct types in source)
+            puestos_de_trabajo_en_plataforma as puestos_trabajo_plataforma,
+            hojas_de_vida_remitidas as hojas_vida_remitidas,
+            edad as edad_candidato,
+            semana_publicacion_vacante as semana_publicacion,
+            mes_publicacion_vacante,
+            anio_publicacion_vacante as anio_publicacion,
+            COALESCE(colocado, 0) as colocado,
+            
+            -- Textual attributes
+            nombre_de_la_empresa as nombre_empresa,
+            nombre_de_la_vacante as nombre_vacante,
+            nombre_del_candidato as nombre_candidato,
+            formacion,
+            telefono,
+            COALESCE(observacion_intermediacion, '') as observacion_intermediacion,
+            COALESCE(observacion_gestion, '') as observacion_gestion,
+            COALESCE(observacion_del_candidato, '') as observacion_candidato,
+            
+            -- Metadata
+            filename,
+            CURRENT_TIMESTAMP() as fecha_carga,
+            
+            -- Partitioning columns
+            {{ inputs.year_of_interest }} as year,
+            {{ inputs.month_of_interest }} as month,
+            
+            -- Clustering-optimized month columns (INT64 for cheap filtering)
+            EXTRACT(MONTH FROM fecha_de_publicacion_de_la_vacante) as month_publicacion_vacante,
+            CASE 
+              WHEN mes_de_colocacion_en_plataforma IS NOT NULL 
+              THEN CAST(
+                CASE 
+                  WHEN LOWER(mes_de_colocacion_en_plataforma) = 'enero' THEN 1
+                  WHEN LOWER(mes_de_colocacion_en_plataforma) = 'febrero' THEN 2
+                  WHEN LOWER(mes_de_colocacion_en_plataforma) = 'marzo' THEN 3
+                  WHEN LOWER(mes_de_colocacion_en_plataforma) = 'abril' THEN 4
+                  WHEN LOWER(mes_de_colocacion_en_plataforma) = 'mayo' THEN 5
+                  WHEN LOWER(mes_de_colocacion_en_plataforma) = 'junio' THEN 6
+                  WHEN LOWER(mes_de_colocacion_en_plataforma) = 'julio' THEN 7
+                  WHEN LOWER(mes_de_colocacion_en_plataforma) = 'agosto' THEN 8
+                  WHEN LOWER(mes_de_colocacion_en_plataforma) = 'septiembre' THEN 9
+                  WHEN LOWER(mes_de_colocacion_en_plataforma) = 'octubre' THEN 10
+                  WHEN LOWER(mes_de_colocacion_en_plataforma) = 'noviembre' THEN 11
+                  WHEN LOWER(mes_de_colocacion_en_plataforma) = 'diciembre' THEN 12
+                  ELSE NULL
+                END AS INT64
+              )
+              ELSE NULL
+            END as month_colocacion
+            
+          FROM `{{ render(vars.project_id) }}.{{ render(vars.source_dataset) }}.{{ render(vars.source_table) }}`
+          WHERE EXTRACT(MONTH FROM fecha_envio_hojas_de_vida_a_la_empresa) = {{ inputs.month_of_interest }}
+            AND EXTRACT(YEAR FROM fecha_envio_hojas_de_vida_a_la_empresa) = {{ inputs.year_of_interest }}
+            AND fecha_envio_hojas_de_vida_a_la_empresa IS NOT NULL;
+
+  - id: get_record_count
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      SELECT 
+        COUNT(*) as total_records,
+        SUM(CASE WHEN colocado = 1 THEN 1 ELSE 0 END) as colocados,
+        ROUND(SAFE_DIVIDE(SUM(CASE WHEN colocado = 1 THEN 1 ELSE 0 END), COUNT(*)) * 100, 2) as tasa_colocacion,
+        COUNT(DISTINCT cedula) as candidatos_unicos,
+        COUNT(DISTINCT empresa_id) as empresas_unicas,
+        COUNT(DISTINCT vacante_id) as vacantes_unicas
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}`
+      WHERE DATE_TRUNC(DATE(fecha_envio_hv), MONTH) = DATE('{{ render(vars.start_date) }}');
+    store: true
+    fetchType: STORE
+
+  - id: validate_data_mart
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      -- Validation queries with partition filter for current month
+      SELECT 
+        'Total Records (Current Month)' AS metric,
+        CAST(COUNT(*) AS STRING) AS value
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}`
+      WHERE DATE_TRUNC(DATE(fecha_envio_hv), MONTH) = DATE('{{ render(vars.start_date) }}')
+      
+      UNION ALL
+      
+      SELECT 
+        'Date Range (Current Month)' AS metric,
+        CONCAT(
+          CAST(MIN(fecha_envio_hv) AS STRING), 
+          ' to ', 
+          CAST(MAX(fecha_envio_hv) AS STRING)
+        ) AS value
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}`
+      WHERE DATE_TRUNC(DATE(fecha_envio_hv), MONTH) = DATE('{{ render(vars.start_date) }}')
+      
+      UNION ALL
+      
+      SELECT 
+        'Total Placements (Current Month)' AS metric,
+        CAST(SUM(colocado) AS STRING) AS value
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}`
+      WHERE DATE_TRUNC(DATE(fecha_envio_hv), MONTH) = DATE('{{ render(vars.start_date) }}')
+      
+      UNION ALL
+      
+      SELECT 
+        'Average Placement Rate (Current Month)' AS metric,
+        CONCAT(CAST(ROUND(AVG(colocado) * 100, 2) AS STRING), '%') AS value
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}`
+      WHERE DATE_TRUNC(DATE(fecha_envio_hv), MONTH) = DATE('{{ render(vars.start_date) }}')
+      
+      UNION ALL
+      
+      SELECT 
+        'Unique Candidates (Current Month)' AS metric,
+        CAST(COUNT(DISTINCT cedula) AS STRING) AS value
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}`
+      WHERE DATE_TRUNC(DATE(fecha_envio_hv), MONTH) = DATE('{{ render(vars.start_date) }}')
+      
+      UNION ALL
+      
+      SELECT 
+        'Unique Companies (Current Month)' AS metric,
+        CAST(COUNT(DISTINCT empresa_id) AS STRING) AS value
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}`
+      WHERE DATE_TRUNC(DATE(fecha_envio_hv), MONTH) = DATE('{{ render(vars.start_date) }}')
+      
+      ORDER BY metric;
+    store: true
+
+  - id: convert_record_count_to_csv
+    type: io.kestra.plugin.serdes.csv.IonToCsv
+    from: "{{ outputs.get_record_count.uri }}"
+
+  - id: convert_validation_to_csv
+    type: io.kestra.plugin.serdes.csv.IonToCsv
+    from: "{{ outputs.validate_data_mart.uri }}"
+
+  - id: log_completion
+    type: io.kestra.plugin.core.log.Log
+    message: |
+      ===== Intermediation Labor Analytics Data Mart Refresh Complete =====
+      Refresh Type: {{ inputs.full_refresh and 'Full' or 'Monthly Incremental' }}
+      Period: {{ render(vars.month_name) | title }} {{ inputs.year_of_interest }}
+      
+      Data mart is ready for querying at:
+      {{ vars.project_id }}.{{ vars.dataset_id }}.{{ vars.fact_table }}
+
+  - id: send_completion_email
+    type: io.kestra.plugin.notifications.mail.MailSend
+    from: "{{ kv('SENDER_EMAIL') }}"
+    to: "{{ kv('RECIPIENT_EMAILS') }}"
+    subject: "✅ Intermediation Data Mart Refreshed - {{ render(vars.month_name) | title }} {{ inputs.year_of_interest }} ({{ inputs.full_refresh and 'Full' or 'Incremental' }})"
+    htmlTextContent: |
+      <h2>Intermediation Labor Analytics Data Mart Refresh Completed</h2>
+      
+      <h3>Refresh Details</h3>
+      <ul>
+        <li><strong>Refresh Type:</strong> {{ inputs.full_refresh and 'Full Refresh (Manual)' or 'Monthly Incremental Update' }}</li>
+        <li><strong>Period:</strong> {{ render(vars.month_name) | title }} {{ inputs.year_of_interest }}</li>
+        <li><strong>Date Range:</strong> {{ render(vars.start_date) }} to {{ render(vars.end_date) }}</li>
+        <li><strong>Execution Time:</strong> {{ now() }}</li>
+        <li><strong>Source Dataset:</strong> {{ vars.source_dataset }}</li>
+        <li><strong>Source Table:</strong> {{ vars.source_table }}</li>
+        <li><strong>Destination Dataset:</strong> {{ vars.dataset_id }}</li>
+        <li><strong>Fact Table:</strong> {{ vars.fact_table }}</li>
+      </ul>
+      
+      <h3>Data Mart Features</h3>
+      <ul>
+        <li>✅ Candidate-vacancy submission grain</li>
+        <li>✅ Placement success tracking (colocado flag)</li>
+        <li>✅ Vulnerable population indicators (disability, VCA, VVG, migrants, ethnic minorities, reincorporated)</li>
+        <li>✅ Company and vacancy dimension keys (MD5 hashes)</li>
+        <li>✅ Education levels and age demographics</li>
+        <li>✅ Geographic distribution (barrio, ciudad, departamento)</li>
+        <li>✅ Channel tracking (gestor, intermediador)</li>
+        <li>✅ Partitioned by year (range bucketing)</li>
+        <li>✅ Clustered by sexo, mes_publicacion_vacante, colocado</li>
+      </ul>
+      
+      <h3>Sample Queries</h3>
+      <pre style="background: #f5f5f5; padding: 10px; border-radius: 5px;">
+      -- Placement rate by gender for {{ render(vars.month_name) | title }} {{ inputs.year_of_interest }}
+      SELECT 
+        sexo,
+        COUNT(*) as submissions,
+        SUM(colocado) as placements,
+        ROUND(SAFE_DIVIDE(SUM(colocado), COUNT(*)) * 100, 2) as placement_rate
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}`
+      WHERE year = {{ inputs.year_of_interest }}
+        AND month = {{ inputs.month_of_interest }}
+      GROUP BY sexo
+      ORDER BY placement_rate DESC;
+
+      -- Vulnerable populations success rates
+      SELECT 
+        'Discapacidad' as poblacion,
+        SUM(CAST(es_discapacidad AS INT64)) as total,
+        SUM(CASE WHEN es_discapacidad AND colocado = 1 THEN 1 ELSE 0 END) as placements,
+        ROUND(SAFE_DIVIDE(SUM(CASE WHEN es_discapacidad AND colocado = 1 THEN 1 ELSE 0 END), SUM(CAST(es_discapacidad AS INT64))) * 100, 2) as rate
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}`
+      WHERE year = {{ inputs.year_of_interest }} AND month = {{ inputs.month_of_interest }}
+      
+      UNION ALL
+      
+      SELECT 'VCA', SUM(CAST(es_vca AS INT64)), SUM(CASE WHEN es_vca AND colocado = 1 THEN 1 ELSE 0 END),
+        ROUND(SAFE_DIVIDE(SUM(CASE WHEN es_vca AND colocado = 1 THEN 1 ELSE 0 END), SUM(CAST(es_vca AS INT64))) * 100, 2)
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}`
+      WHERE year = {{ inputs.year_of_interest }} AND month = {{ inputs.month_of_interest }}
+      
+      UNION ALL
+      
+      SELECT 'Migrante', SUM(CAST(es_migrante AS INT64)), SUM(CASE WHEN es_migrante AND colocado = 1 THEN 1 ELSE 0 END),
+        ROUND(SAFE_DIVIDE(SUM(CASE WHEN es_migrante AND colocado = 1 THEN 1 ELSE 0 END), SUM(CAST(es_migrante AS INT64))) * 100, 2)
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}`
+      WHERE year = {{ inputs.year_of_interest }} AND month = {{ inputs.month_of_interest }};
+
+      -- Top companies by placement success
+      SELECT 
+        nombre_empresa,
+        COUNT(*) as candidates_sent,
+        SUM(colocado) as hires,
+        ROUND(SAFE_DIVIDE(SUM(colocado), COUNT(*)) * 100, 2) as hiring_rate
+      FROM `{{ render(vars.project_id) }}.{{ render(vars.dataset_id) }}.{{ render(vars.fact_table) }}`
+      WHERE year = {{ inputs.year_of_interest }}
+        AND month = {{ inputs.month_of_interest }}
+      GROUP BY nombre_empresa
+      HAVING COUNT(*) >= 5
+      ORDER BY hires DESC
+      LIMIT 20;
+      </pre>
+      
+      <p>See attached files for detailed statistics and validation results.</p>
+      
+      <p><em>The data mart is now ready for querying in BigQuery and can be connected to your BI tools.</em></p>
+    attachments:
+      - name: record_count_{{ inputs.month_of_interest }}_{{ inputs.year_of_interest }}.csv
+        uri: "{{ outputs.convert_record_count_to_csv.uri }}"
+        contentType: text/csv
+      - name: validation_results.csv
+        uri: "{{ outputs.convert_validation_to_csv.uri }}"
+        contentType: text/csv
+    host: "{{ kv('SMTP_SERVER') }}"
+    port: "{{ kv('SMTP_PORT') }}"
+    username: "{{ kv('GMAIL_USERNAME') }}"
+    password: "{{ kv('GMAIL_APP_PASSWORD') }}"
+    transportStrategy: SMTP_TLS
+
+errors:
+  - id: error_notification
+    type: io.kestra.plugin.notifications.mail.MailSend
+    from: "{{ kv('SENDER_EMAIL') }}"
+    to: "{{ kv('RECIPIENT_EMAILS') }}"
+    subject: "❌ Intermediation Data Mart Load Failed - {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}"
+    htmlTextContent: |
+      <h2>Intermediation Data Mart Load - Failed</h2>
+      <p>An error occurred while loading data to the BigQuery fact table.</p>
+      
+      <h3>Error Details:</h3>
+      <ul>
+        <li><strong>Refresh Type:</strong> {{ inputs.full_refresh and 'Full Refresh' or 'Incremental' }}</li>
+        <li><strong>Period:</strong> {{ render(vars.month_name) | title }} {{ inputs.year_of_interest }}</li>
+        <li><strong>Workflow:</strong> {{ flow.id }}</li>
+        <li><strong>Execution:</strong> {{ execution.id }}</li>
+      </ul>
+      
+      <p>Please check the Kestra logs for detailed error information.</p>
+    host: "{{ kv('SMTP_SERVER') }}"
+    port: "{{ kv('SMTP_PORT') }}"
+    username: "{{ kv('GMAIL_USERNAME') }}"
+    password: "{{ kv('GMAIL_APP_PASSWORD') }}"
+    transportStrategy: SMTP_TLS
+
+triggers:
+  - id: schedule_monthly_refresh
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 4 5 * *"
+    description: "Run monthly incremental refresh on the 5th of each month at 4 AM"
+    inputs:
+      full_refresh: false
+      year_of_interest: "{{ now() | dateAdd(-1, 'MONTHS') | date('yyyy') }}"
+      month_of_interest: "{{ now() | dateAdd(-1, 'MONTHS') | date('M') | int }}"

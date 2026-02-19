@@ -1,124 +1,138 @@
-# GCS MODULE VARIABLES
-locals {
-  data_lake_bucket = "operations-raw-data"
-}
-
+# GCP Project Variables
 variable "credentials" {
-  description = "My Credentials"
+  description = "Path to GCP service account credentials JSON file"
+  type        = string
 }
 
 variable "project_id" {
-  description = "Public Employment Pulse is a strategic data-driven project designed to provide insights into the structure and dynamics of the public employment center operations in the city of Barranquilla."
+  description = "GCP Project ID"
+  type        = string
 }
 
 variable "region" {
-  description = "Region for GCP resources. Choose as per your location: https://cloud.google.com/about/locations"
-  type = string
+  description = "GCP region for resources"
+  type        = string
+  default     = "us-central1"
 }
 
 variable "location" {
-  description = "Project Location"
-  #Update the below to your desired location
+  description = "GCP location for multi-regional resources"
+  type        = string
+  default     = "US"
 }
 
+# Storage Variables
 variable "storage_class" {
-  description = "Storage class type for your bucket. Check official docs for more info."
+  description = "Storage class for GCS buckets"
+  type        = string
+  default     = "STANDARD"
 }
 
+# BigQuery Variables
 variable "BQ_DATASET" {
-  description = "BigQuery Dataset that raw data (from GCS) will be written to"
-  type = string
+  description = "Main BigQuery dataset name"
+  type        = string
+}
+
+variable "OPERATIONS_DATASET" {
+  description = "Operations BigQuery dataset name"
+  type        = string
+  default     = "operations_co"
 }
 
 variable "TABLE_NAME" {
-  description = "BigQuery table"
-  type = string
+  description = "BigQuery table name"
+  type        = string
 }
 
-
-
-# KESTRA MODULE VARIABLES
+# Kestra Variables
 variable "kestra_db_password" {
-  description = "Password for Kestra database user"
+  description = "Password for Kestra database"
   type        = string
   sensitive   = true
 }
 
 variable "zone" {
-  description = "GCP zone"
+  description = "GCP zone for zonal resources"
   type        = string
+  default     = "us-central1-a"
 }
 
-# VPC CONNECTOR MODULE VARIABLES
-variable "vpc_network" {
-  description = "Name of the VPC network"
-  type        = string
-}
-
-# VPC Connector
+# VPC Connector Variables
 variable "connector_name" {
   description = "Name of the VPC connector"
   type        = string
+  default     = "pgadmin-connector"
 }
 
-variable "max_throughput" {
-  description = "VPC connector throughput in Mbps (200–1000, multiple of 100)"
-  type        = number
+variable "vpc_network" {
+  description = "VPC network name"
+  type        = string
+  default     = "default"
 }
 
 variable "min_throughput" {
-  description = "VPC connector throughput in Mbps (200–1000, multiple of 100)"
+  description = "Minimum throughput for VPC connector"
   type        = number
+  default     = 200
 }
 
+variable "max_throughput" {
+  description = "Maximum throughput for VPC connector"
+  type        = number
+  default     = 400
+}
 
-# CLOUDSQL POSTGRES MODULE VARIABLES
-# Cloud SQL PostgreSQL
+# Cloud SQL Variables
 variable "instance_name" {
   description = "Cloud SQL instance name"
   type        = string
+  default     = "postgres-16"
 }
 
 variable "db_user" {
-  description = "PostgreSQL username"
+  description = "Database user name"
   type        = string
 }
 
 variable "db_password" {
-  description = "PostgreSQL password"
+  description = "Database password"
   type        = string
   sensitive   = true
 }
 
 variable "db_name" {
-  description = "Name of the application database"
+  description = "Database name"
   type        = string
 }
 
-# pgAdmin Cloud Run
+# pgAdmin Variables
 variable "service_name" {
-  description = "Cloud Run service name for pgAdmin"
+  description = "pgAdmin Cloud Run service name"
   type        = string
+  default     = "pgadmin-service"
 }
 
 variable "pgadmin_email" {
-  description = "pgAdmin default login email"
+  description = "pgAdmin login email"
   type        = string
 }
 
 variable "pgadmin_password" {
-  description = "pgAdmin default login password"
+  description = "pgAdmin login password"
   type        = string
   sensitive   = true
 }
 
+# IAM Variables
 variable "invoker_identity" {
-  description = "IAM identity allowed to invoke pgAdmin (e.g., user:you@example.com)"
+  description = "Identity that can invoke Cloud Run services"
   type        = string
 }
 
-# SERVICE NETWORKING MODULE VARIABLES
+# Service Networking Variables
 variable "private_ip_name" {
-  description = "Name for the private IP address"
+  description = "Name for the private IP address range"
   type        = string
+  default     = "cloudsql-private-ip"
 }
