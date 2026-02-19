@@ -69,3 +69,22 @@ Photo: Zoom of data handling operations inside GCP.
 
 The tutorials on how to setup and run this project can be found [here](https://github.com/bizzaccelerator/public-employment-pulse/wiki).
 
+## Tangible result
+
+This project delivered a complete, operational data engineering pipeline that transformed raw, operational data from the Public Employment Center in Barranquilla into structured, analytics-ready datasets and interactive dashboard.
+
+### Dashboard:
+
+A dashboard was created to visually deliver information about main indicators used in the agency. The following image captures it:
+
+![Dashboard picture](https://github.com/bizzaccelerator/Footballers-transfers-Insights/blob/main/Images/dashboard.jpg)
+
+An in-live, interactive version of the dashboard can be foun [here](https://lookerstudio.google.com/u/0/reporting/7f0b5c4b-eefd-44c5-88a8-467a20638ec2) 
+
+### Recommendations
+
+It seems to exist an apparent relationship between the weather in a day and the number of player transferences performed in that specific day. However, it is recommended that further investigations need to be done.  
+
+## Further Improvements
+
+There is scope for improvement in several areas of this project, such as:
