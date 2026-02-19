@@ -83,7 +83,7 @@ Then, you will see different sections as this:
 
 ![Registry section](https://github.com/bizzaccelerator/public-employment-pulse/blob/main/assets/dashboard-registries.png)
 
-An in-live, interactive version of the dashboard can be foun [here](https://lookerstudio.google.com/u/0/reporting/7f0b5c4b-eefd-44c5-88a8-467a20638ec2) 
+An in-live, interactive version of the dashboard can be found [here](https://lookerstudio.google.com/u/0/reporting/7f0b5c4b-eefd-44c5-88a8-467a20638ec2) 
 
 ### Recommendations
 
