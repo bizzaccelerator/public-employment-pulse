@@ -71,7 +71,22 @@ The tutorials on how to setup and run this project can be found [here](https://g
 
 ## Tangible result
 
-This project delivered a complete, operational data engineering pipeline that transformed raw, operational data from the Public Employment Center in Barranquilla into structured, analytics-ready datasets and interactive dashboard.
+**Public Employment Pulse** modernized the Public Employment Agency’s data ecosystem, turning fragmented operational records into a structured, automated, and analytics-ready platform that now drives evidence-based decision-making in the Mayor’s Office of Barranquilla. This project delivered a complete, operational data engineering pipeline that transformed raw, operational data from the Public Employment Center into structured, analytics-ready datasets and interactive dashboard.
+
+### Before the Project
+
+* ****Reporting processes**** required 3–5 days of manual effort per cycle, reducing operational time of the agency
+* ****Metrics varied across teams****, leading to inconsistent KPI definitions and conflicting reports across areas
+* ****Raw data lacked validation****, resulting in error rates above 15% and frequent rework
+* ****Decision-making**** relied on static reports with limited insight, often compromised by manual data handling errors and delayed updates
+
+### Transformation & Results After Implementation
+
+* A **fully automated pipeline** now delivers curated datasets **monthly**, eliminating repetitive manual work and **reducing reporting cycle time by 90%**
+* A centralized data warehouse enables **standardized KPI calculation across all units**, ensuring consistency and comparability over time
+* Embedded validation rules reduced data errors by over 90%, **improving overall accuracy from 85% to 98%** and eliminating human error in reporting
+* Decision-makers access **reliable dashboards from any device — mobile or desktop — via the web**, cutting **reporting time from days to minutes** and boosting adoption among 40+ staff members
+* Established **a single source of truth for employment intermediation analytics**, enabling the Mayor’s Office to track employment programs with near accurate visibility, strengthening accountability and resource allocation
 
 ### Dashboard:
 
