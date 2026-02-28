@@ -1,0 +1,205 @@
+id: cv-raw-data-pipeline-code-health
+namespace: public_employment_pulse
+
+# =============================================================================
+# PURPOSE
+# =============================================================================
+# This workflow is a standalone code health check for the registro_hv
+# transformation module.  It has NO dependency on data files, database
+# connections, or GCS buckets.
+#
+# It answers a different question from the embedded tests in cv-raw-data-pipeline:
+#
+#   cv-raw-data-pipeline          → "Did THIS RUN's data pass quality gates?"
+#   cv-raw-data-pipeline-code-health → "Is the CODEBASE healthy right now?"
+#
+# WHEN TO TRIGGER THIS WORKFLOW
+# ─────────────────────────────
+# 1. On a schedule  — catches silent regressions between monthly runs.
+# 2. Manually       — after any change to registro_hv.py, before deploying.
+# 3. Via webhook    — can be wired to a GitHub push event if the repo is
+#                     connected to Kestra's webhook trigger later.
+#
+# RELATIONSHIP TO THE MAIN PIPELINE
+# ──────────────────────────────────
+# Both workflows share the same namespace files:
+#   registro_hv.py        the module under test
+#   test_registro_hv.py   the pytest suite
+#   run_tests.py          the pytest orchestrator
+#
+# There is intentionally NO subflow call from cv-raw-data-pipeline into
+# this workflow.  Each workflow is triggered independently.  The embedded
+# tasks in the main pipeline are the DATA INTEGRITY gate (run with real
+# data context); this workflow is the CODE HEALTH gate (run on demand or
+# schedule, no data context needed).
+# =============================================================================
+
+triggers:
+  # ── 1. Scheduled: every Monday at 08:00 local time ──────────────────────
+  - id: weekly_schedule
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 8 * * MON"
+    timezone: America/Bogota
+
+labels:
+  type: code-health
+  module: registro_hv
+
+tasks:
+
+  # ---------------------------------------------------------------------------
+  # TASK 1: Run pytest against registro_hv.py
+  # ---------------------------------------------------------------------------
+  - id: run_code_health_tests
+    type: io.kestra.plugin.scripts.python.Commands
+    docker:
+      image: python:3.11-slim
+    description: "Standalone code health check — runs the full pytest suite without any data dependency"
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    namespaceFiles:
+      enabled: true
+      include:
+        - "registro_hv.py"        # module under test
+        - "test_registro_hv.py"   # pytest suite (same file as in the main pipeline)
+        - "run_tests.py"          # pytest orchestrator (same file as in the main pipeline)
+    beforeCommands:
+      - pip install pandas numpy openpyxl pyarrow fastparquet pytest pytest-json-report --quiet
+    commands:
+      - "python run_tests.py"
+    outputFiles:
+      - "test_results.json"
+      - "test_report.txt"
+
+
+  # ---------------------------------------------------------------------------
+  # TASK 2: Notify — always fires, regardless of test outcome
+  # ---------------------------------------------------------------------------
+  - id: notify_code_health
+    type: io.kestra.plugin.notifications.mail.MailSend
+    allowFailure: true
+    from: "{{ kv('SENDER_EMAIL') }}"
+    to: "{{ kv('RECIPIENT_EMAILS') }}"
+    subject: >-
+      {% if outputs.run_code_health_tests.exitCode == 0 %}
+        [Code Health] PASSED - registro_hv {{ execution.startDate | date("yyyy-MM-dd") }}
+      {% else %}
+        [Code Health] FAILED - registro_hv {{ execution.startDate | date("yyyy-MM-dd") }}
+      {% endif %}
+    htmlTextContent: |
+      {% set results = outputs.run_code_health_tests.outputFiles['test_results.json'] | json %}
+
+      <h2>
+        {% if results.all_passed %}
+          Code health check passed &mdash; all {{ results.total }} tests green
+        {% else %}
+          Code health check failed &mdash; {{ results.failed }} of {{ results.total }} tests failed
+        {% endif %}
+      </h2>
+
+      <table style="border-collapse:collapse;font-family:monospace;font-size:0.9em;">
+        <tr>
+          <td style="padding:4px 12px 4px 0;color:#666;">Workflow</td>
+          <td><strong>cv-raw-data-pipeline-code-health</strong></td>
+        </tr>
+        <tr>
+          <td style="padding:4px 12px 4px 0;color:#666;">Trigger</td>
+          <td>{{ trigger.type | default("manual") }}</td>
+        </tr>
+        <tr>
+          <td style="padding:4px 12px 4px 0;color:#666;">Run at</td>
+          <td>{{ results.run_at }}</td>
+        </tr>
+        <tr>
+          <td style="padding:4px 12px 4px 0;color:#666;">Total tests</td>
+          <td>{{ results.total }}</td>
+        </tr>
+        <tr>
+          <td style="padding:4px 12px 4px 0;color:#666;">Passed</td>
+          <td style="color:#2a7a2a;">{{ results.passed }}</td>
+        </tr>
+        <tr>
+          <td style="padding:4px 12px 4px 0;color:#666;">Failed</td>
+          <td style="color:{% if results.failed > 0 %}#cc0000{% else %}#2a7a2a{% endif %};">
+            {{ results.failed }}
+          </td>
+        </tr>
+      </table>
+
+      {% if not results.all_passed %}
+      <h3 style="color:#cc0000;margin-top:24px;">Failed Tests</h3>
+      <ul style="font-family:monospace;">
+        {% for t in results.tests %}
+          {% if not t.passed %}
+          <li style="margin-bottom:12px;">
+            <strong>{{ t.name }}</strong><br>
+            <pre style="font-size:0.82em;background:#fff5f5;border-left:3px solid #cc0000;padding:8px;margin-top:4px;">{{ t.detail }}</pre>
+          </li>
+          {% endif %}
+        {% endfor %}
+      </ul>
+
+      <p style="color:#cc0000;">
+        <strong>Action required:</strong> review the failing tests before the
+        next scheduled pipeline run.  If registro_hv.py was recently modified,
+        check the change that introduced the regression.
+      </p>
+      {% else %}
+      <p style="color:#2a7a2a;">
+        No action required. The codebase is healthy.
+      </p>
+      {% endif %}
+
+      <hr style="margin-top:24px;border:none;border-top:1px solid #ddd;">
+      <p style="font-size:0.8em;color:#999;">
+        Full test log attached &mdash; also visible in the Kestra UI under<br>
+        <em>public_employment_pulse / cv-raw-data-pipeline-code-health</em>
+      </p>
+
+    attachments:
+      - name: "code_health_{{ execution.startDate | date('yyyy-MM-dd') }}.txt"
+        uri: "{{ outputs.run_code_health_tests.outputFiles['test_report.txt'] }}"
+        contentType: text/plain
+    host: "{{ kv('SMTP_SERVER') }}"
+    port: "{{ kv('SMTP_PORT') }}"
+    username: "{{ kv('GMAIL_USERNAME') }}"
+    password: "{{ kv('GMAIL_APP_PASSWORD') }}"
+    transportStrategy: SMTP_TLS
+
+
+# =============================================================================
+# ERROR HANDLER
+# =============================================================================
+errors:
+  - id: notify_infrastructure_failure
+    type: io.kestra.plugin.notifications.mail.MailSend
+    from: "{{ kv('SENDER_EMAIL') }}"
+    to: "{{ kv('RECIPIENT_EMAILS') }}"
+    subject: "[Code Health] ERROR - workflow failed to execute on {{ execution.startDate | date('yyyy-MM-dd') }}"
+    htmlTextContent: |
+      <h2 style="color:#cc0000;">Code health workflow could not run</h2>
+      <p>
+        The <strong>cv-raw-data-pipeline-code-health</strong> workflow
+        encountered an infrastructure error before the tests could execute.
+        This is NOT a test failure &mdash; the test runner never started.
+      </p>
+      <table style="font-family:monospace;font-size:0.9em;">
+        <tr>
+          <td style="padding:4px 12px 4px 0;color:#666;">Execution ID</td>
+          <td>{{ execution.id }}</td>
+        </tr>
+        <tr>
+          <td style="padding:4px 12px 4px 0;color:#666;">Failed task</td>
+          <td>{{ task.id }}</td>
+        </tr>
+        <tr>
+          <td style="padding:4px 12px 4px 0;color:#666;">Error</td>
+          <td>{{ error.message }}</td>
+        </tr>
+      </table>
+      <p>Check the Kestra UI execution log for the full stack trace.</p>
+    host: "{{ kv('SMTP_SERVER') }}"
+    port: "{{ kv('SMTP_PORT') }}"
+    username: "{{ kv('GMAIL_USERNAME') }}"
+    password: "{{ kv('GMAIL_APP_PASSWORD') }}"
+    transportStrategy: SMTP_TLS
