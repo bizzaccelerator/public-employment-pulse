@@ -58,6 +58,89 @@ tasks:
       - "*.parquet"
       - "record_count.txt"
 
+  - id: run_data_quality_tests
+    type: io.kestra.plugin.scripts.python.Commands
+    docker:
+      image: python:3.11-slim
+    description: "Run pytest data quality tests for the registro_hv transformation logic"
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    namespaceFiles:
+      enabled: true
+      include:
+        - "registro_hv.py"        # module under test (already used by task 2)
+        - "test_registro_hv.py"   # pytest test suite
+        - "run_tests.py"          # orchestrator: runs pytest, writes output files
+    beforeCommands:
+      # pytest-json-report produces the machine-readable JSON that run_tests.py
+      # parses into test_results.json and test_report.txt
+      - pip install pandas numpy openpyxl pyarrow fastparquet pytest pytest-json-report --quiet
+    commands:
+      - "python run_tests.py"
+    outputFiles:
+      - "test_results.json"   # machine-readable -- consumed by notify_test_results
+      - "test_report.txt"     # human-readable  -- attached to notification email
+
+  - id: notify_test_results
+    type: io.kestra.plugin.notifications.mail.MailSend
+    # allowFailure: true ensures this notification task always executes.
+    # Without it, a non-zero exit from run_data_quality_tests would halt
+    # the pipeline before the email fires -- the team would have no alert.
+    # The overall execution is still marked FAILED by Kestra when tests fail.
+    allowFailure: true
+    from: "{{ kv('SENDER_EMAIL') }}"
+    to: "{{ kv('RECIPIENT_EMAILS') }}"
+    subject: >-
+      {% if outputs.run_data_quality_tests.exitCode == 0 %}
+        Tests PASSED - registro_hv {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}
+      {% else %}
+        Tests FAILED - registro_hv {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}
+      {% endif %}
+    htmlTextContent: |
+      {% set results = outputs.run_data_quality_tests.outputFiles['test_results.json'] | json %}
+
+      <h2>
+        {% if results.all_passed %}
+          All {{ results.total }} tests passed
+        {% else %}
+          {{ results.failed }} of {{ results.total }} tests failed
+        {% endif %}
+      </h2>
+
+      <p>
+        <strong>Pipeline run:</strong>
+        registro_hv &mdash; {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}<br>
+        <strong>Run at:</strong> {{ results.run_at }}<br>
+        <strong>Total tests:</strong> {{ results.total }}<br>
+        <strong>Passed:</strong> {{ results.passed }}<br>
+        <strong>Failed:</strong> {{ results.failed }}
+      </p>
+
+      {% if not results.all_passed %}
+      <h3 style="color:#cc0000;">Failed Tests</h3>
+      <ul>
+        {% for t in results.tests %}
+          {% if not t.passed %}
+          <li>
+            <strong>{{ t.name }}</strong><br>
+            <pre style="font-size:0.85em;background:#f8f8f8;padding:6px;">{{ t.detail }}</pre>
+          </li>
+          {% endif %}
+        {% endfor %}
+      </ul>
+      {% endif %}
+
+      <p>The full test log is attached as <code>test_report.txt</code>.</p>
+    attachments:
+      - name: "test_report_{{ inputs.month_of_interest }}_{{ inputs.year_of_interest }}.txt"
+        uri: "{{ outputs.run_data_quality_tests.outputFiles['test_report.txt'] }}"
+        contentType: text/plain
+    host: "{{ kv('SMTP_SERVER') }}"
+    port: "{{ kv('SMTP_PORT') }}"
+    username: "{{ kv('GMAIL_USERNAME') }}"
+    password: "{{ kv('GMAIL_APP_PASSWORD') }}"
+    transportStrategy: SMTP_TLS
+
   - id: log_completion
     type: io.kestra.plugin.core.log.Log
     message: "Excel file processed successfully"
