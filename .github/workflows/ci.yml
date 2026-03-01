@@ -27,7 +27,7 @@ name: CI
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ main, development ]
     paths:
       - "code_used/snippets_support/workload/registro_hv.py"
       - "code_used/snippets_support/tests/db_operations.py"
@@ -37,7 +37,7 @@ on:
       - ".github/workflows/ci.yml"
       - "requirements-test.txt"
   pull_request:
-    branches: [ main, develop ]
+    branches: [ main, development ]
     paths:
       - "code_used/snippets_support/workload/registro_hv.py"
       - "code_used/snippets_support/tests/db_operations.py"
