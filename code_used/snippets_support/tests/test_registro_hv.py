@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
-from registro_hv import (
+from code_used.snippets_support.workload.registro_hv import (
     clean_string_columns,
     filter_valid_records,
     filter_by_year,

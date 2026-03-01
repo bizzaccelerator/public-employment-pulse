@@ -54,19 +54,36 @@ def clean_string_columns(df: pd.DataFrame) -> pd.DataFrame:
     types (e.g. Excel numbers stored as text). Converting to str first
     guarantees the .strip() call never raises.
 
+    número_documento requires special handling: when any row in the column
+    is null, pandas reads the entire column as float64 (e.g. 111111.0).
+    A plain astype(str) then produces "111111.0" instead of "111111",
+    breaking all downstream string comparisons and uniqueness logic.
+    The fix converts via Int64 first (which preserves nulls as <NA>),
+    then to str, then replaces the "<NA>" sentinel back to pd.NA so that
+    filter_valid_records() can correctly identify missing document numbers.
+
     Args:
         df: Raw DataFrame from load_excel().
 
     Returns:
         DataFrame with the target columns cast to str and stripped.
     """
-    cols = [
-        "número_documento", "teléfono", "título_homologado",
-        "ciudad_de_residencia", "email", "programa_de_gobierno",
-        "fecha_actualización", "%_hoja_vida", "fecha_cambio_prestador",
-        "vereda/localidad/centro_poblado", "celular",
+    # --- número_documento: integer-safe conversion to avoid "111111.0" ---
+    if "número_documento" in df.columns:
+        df["número_documento"] = (
+            pd.to_numeric(df["número_documento"], errors="coerce")
+            .astype("Int64")       # nullable integer — preserves NaN as <NA>
+            .astype(str)           # "111111", not "111111.0"
+            .replace("<NA>", pd.NA)  # restore proper null for filter_valid_records
+        )
+
+    # --- all other string columns: plain strip ---
+    str_cols = [
+        "teléfono", "título_homologado", "ciudad_de_residencia", "email",
+        "programa_de_gobierno", "fecha_actualización", "%_hoja_vida",
+        "fecha_cambio_prestador", "vereda/localidad/centro_poblado", "celular",
     ]
-    for col in cols:
+    for col in str_cols:
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip()
     return df
