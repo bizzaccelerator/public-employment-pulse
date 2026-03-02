@@ -1,26 +1,5 @@
-# .github/workflows/ci.yml
 # =============================================================================
 # CI PIPELINE — public-employment-pulse
-# =============================================================================
-# Triggered on every push and pull request to main/develop.
-#
-# TWO JOBS:
-#
-#  unit-tests
-#  ----------
-#  Runs the full pytest unit suite (test_registro_hv.py).
-#  No external services needed — pure Python + pandas.
-#  Fast: ~60 seconds including pip install.
-#
-#  integration-tests
-#  -----------------
-#  Runs test_integration.py against a real PostgreSQL 15 container.
-#  Catches column mapping drift, MERGE idempotency, and DB round-trip
-#  correctness — things unit tests structurally cannot verify.
-#  Slower: ~90 seconds including DB spin-up.
-#
-# BOTH JOBS MUST PASS before a PR can be merged. Enforce via:
-# GitHub -> Settings -> Branches -> Require status checks before merging.
 # =============================================================================
 
 name: CI
@@ -29,21 +8,38 @@ on:
   push:
     branches: [ main, development ]
     paths:
+      # registro_hv module
       - "code_used/snippets_support/workload/registro_hv.py"
       - "code_used/snippets_support/tests/db_operations.py"
       - "code_used/snippets_support/tests/test_registro_hv.py"
       - "code_used/snippets_support/tests/test_integration.py"
-      - "fixtures/**"
+      - "fixtures/fixture_data.py"
+      # orientacion_hv module
+      - "code_used/snippets_support/workload/orientacion_hv.py"
+      - "code_used/snippets_support/tests/db_operations_orientacion.py"
+      - "code_used/snippets_support/tests/test_orientacion_hv.py"
+      - "code_used/snippets_support/tests/test_integration_orientacion.py"
+      - "fixtures/fixture_data_orientacion.py"
+      # shared
       - ".github/workflows/ci.yml"
       - "requirements-test.txt"
+
   pull_request:
     branches: [ main, development ]
     paths:
+      # registro_hv module
       - "code_used/snippets_support/workload/registro_hv.py"
       - "code_used/snippets_support/tests/db_operations.py"
       - "code_used/snippets_support/tests/test_registro_hv.py"
       - "code_used/snippets_support/tests/test_integration.py"
-      - "fixtures/**"
+      - "fixtures/fixture_data.py"
+      # orientacion_hv module
+      - "code_used/snippets_support/workload/orientacion_hv.py"
+      - "code_used/snippets_support/tests/db_operations_orientacion.py"
+      - "code_used/snippets_support/tests/test_orientacion_hv.py"
+      - "code_used/snippets_support/tests/test_integration_orientacion.py"
+      - "fixtures/fixture_data_orientacion.py"
+      # shared
       - ".github/workflows/ci.yml"
       - "requirements-test.txt"
 
@@ -52,13 +48,14 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+
 jobs:
 
   # ---------------------------------------------------------------------------
-  # JOB 1: Unit tests — no database needed
+  # JOB 1: registro_hv — Unit tests
   # ---------------------------------------------------------------------------
-  unit-tests:
-    name: Unit Tests
+  unit-tests-registro:
+    name: "Unit Tests · registro_hv"
     runs-on: ubuntu-latest
 
     steps:
@@ -81,23 +78,25 @@ jobs:
             --tb=short \
             -v \
             --json-report \
-            --json-report-file=unit-test-results.json
+            --json-report-file=unit-test-results-registro.json
 
       - name: Upload unit test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: unit-test-results
-          path: unit-test-results.json
+          name: unit-test-results-registro
+          path: unit-test-results-registro.json
           retention-days: 30
 
 
   # ---------------------------------------------------------------------------
-  # JOB 2: Integration tests — PostgreSQL service container required
+  # JOB 2: registro_hv — Integration tests
+  # Runs only after unit tests pass (saves minutes on obvious breakage).
   # ---------------------------------------------------------------------------
-  integration-tests:
-    name: Integration Tests
+  integration-tests-registro:
+    name: "Integration Tests · registro_hv"
     runs-on: ubuntu-latest
+    needs: unit-tests-registro
 
     services:
       postgres:
@@ -149,24 +148,137 @@ jobs:
             --tb=short \
             -v \
             --json-report \
-            --json-report-file=integration-test-results.json
+            --json-report-file=integration-test-results-registro.json
 
       - name: Upload integration test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: integration-test-results
-          path: integration-test-results.json
+          name: integration-test-results-registro
+          path: integration-test-results-registro.json
           retention-days: 30
 
 
   # ---------------------------------------------------------------------------
-  # JOB 3: Notify on failure (main branch only)
+  # JOB 3: orientacion_hv — Unit tests
+  # ---------------------------------------------------------------------------
+  unit-tests-orientacion:
+    name: "Unit Tests · orientacion_hv"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements-test.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-test.txt
+
+      - name: Run unit tests
+        run: |
+          pytest code_used/snippets_support/tests/test_orientacion_hv.py \
+            --tb=short \
+            -v \
+            --json-report \
+            --json-report-file=unit-test-results-orientacion.json
+
+      - name: Upload unit test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results-orientacion
+          path: unit-test-results-orientacion.json
+          retention-days: 30
+
+
+  # ---------------------------------------------------------------------------
+  # JOB 4: orientacion_hv — Integration tests
+  # Runs only after unit tests pass.
+  # ---------------------------------------------------------------------------
+  integration-tests-orientacion:
+    name: "Integration Tests · orientacion_hv"
+    runs-on: ubuntu-latest
+    needs: unit-tests-orientacion
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER:     postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB:       postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
+
+    env:
+      DB_HOST:     localhost
+      DB_PORT:     5432
+      DB_NAME:     postgres
+      DB_USER:     postgres
+      DB_PASSWORD: postgres
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements-test.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-test.txt
+
+      - name: Wait for PostgreSQL
+        run: |
+          for i in {1..10}; do
+            pg_isready -h localhost -p 5432 -U postgres && break
+            echo "Waiting for postgres... attempt $i"
+            sleep 2
+          done
+
+      - name: Run integration tests
+        run: |
+          pytest code_used/snippets_support/tests/test_integration_orientacion.py \
+            --tb=short \
+            -v \
+            --json-report \
+            --json-report-file=integration-test-results-orientacion.json
+
+      - name: Upload integration test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results-orientacion
+          path: integration-test-results-orientacion.json
+          retention-days: 30
+
+
+  # ---------------------------------------------------------------------------
+  # JOB 5: Notify on failure (main branch only)
+  # Fires when ANY of the four test jobs fails.
   # ---------------------------------------------------------------------------
   notify-on-failure:
     name: Notify on Failure
     runs-on: ubuntu-latest
-    needs: [ unit-tests, integration-tests ]
+    needs:
+      - unit-tests-registro
+      - integration-tests-registro
+      - unit-tests-orientacion
+      - integration-tests-orientacion
     if: failure() && github.ref == 'refs/heads/main'
 
     steps:
@@ -189,4 +301,11 @@ jobs:
             Branch : ${{ github.ref_name }}
             Run URL: ${{ github.server_url }}/${{ github.repository }}/actions/run/${{ github.run_id }}
 
-            Check the Actions tab for the full test report and logs.
+            Failed jobs are visible in the Actions tab.
+            Check the uploaded JSON artifacts for the full test report.
+
+            Jobs in this run:
+              unit-tests-registro          → ${{ needs.unit-tests-registro.result }}
+              integration-tests-registro   → ${{ needs.integration-tests-registro.result }}
+              unit-tests-orientacion       → ${{ needs.unit-tests-orientacion.result }}
+              integration-tests-orientacion → ${{ needs.integration-tests-orientacion.result }}
