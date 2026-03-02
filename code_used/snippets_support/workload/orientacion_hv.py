@@ -1,387 +1,799 @@
+"""
+ETL script for processing psychological orientation (Orientación HV) data.
+
+Structured as pure, testable functions following the same conventions as
+registro_hv.py.  The main() function at the bottom orchestrates the full
+pipeline and is the only entry point that reads environment variables or
+writes files to disk.
+"""
+
 import pandas as pd
 import numpy as np
 import os
 
-# inputs 
-# The new registries for this months are
-prev_month = int(os.getenv('MONTH'))
-prev_year = int(os.getenv('YEAR'))
 
-# reading the raw data
-orientados = pd.read_excel('sise_psico', sheet_name='BD_Indicador_1')
-registrados = pd.read_excel('registries',sheet_name='BD_Acumulado-2024-2026')
-psicologas = pd.read_excel('psicologist', sheet_name='Orientados')
-talleres = pd.read_excel('sise_psico', sheet_name='Reporte_Indicador_2')
+# ---------------------------------------------------------------------------
+# 1. INGESTION
+# ---------------------------------------------------------------------------
 
+def load_orientados(filepath: str, sheet_name: str = "BD_Indicador_1") -> pd.DataFrame:
+    """
+    Read the 'orientados' sheet from the SISE-psicología Excel file.
 
-# Cleaning and preprocessing
-orientados.columns = orientados.columns.str.lower()
-talleres.columns = talleres.columns.str.lower()
+    Normalisation applied:
+      - Column names lowercased.
+      - Spaces replaced with underscores.
 
-for column in ['fechaagendamiento', 'fechaejecucion', 'fechaevaluacion']:
-    orientados[column] = pd.to_datetime(orientados[column])
-    talleres[column] = pd.to_datetime(talleres[column])
+    Args:
+        filepath:   Path to the Excel file (or Kestra virtual path 'sise_psico').
+        sheet_name: Name of the sheet to read.
 
-for name in orientados.columns:
-    orientados[name] = orientados[name].apply(lambda x: x.lower() if isinstance(x, str) else x)
-    talleres[name] = talleres[name].apply(lambda x: x.lower() if isinstance(x, str) else x)
-
-orientados = orientados.rename(columns={
-    'fechaagendamiento':'fechaagendamiento_orientacion',
-    'fechaejecucion':'fechaejecucion_orientacion',
-    'fechaevaluacion':'fechaevaluacion_orientacion',
-    'usuarionombre':'orientador',
-})
-talleres = talleres.rename(columns={
-    'fechaagendamiento':'fechaagendamiento_taller',
-    'fechaejecucion':'fechaejecucion_taller',
-    'fechaevaluacion':'fechaevaluacion_taller',
-    'usuarionombre':'tallerista',
-})
-
-# Preprocessing date columns to extract month and year
-orientados['mes_orientado'] = orientados['fechaejecucion_orientacion'].dt.month
-orientados['mes_orientado'] = pd.to_numeric(orientados['mes_orientado'], errors='coerce').round().astype('Int64')
-
-orientados['año_orientado'] = orientados['fechaejecucion_orientacion'].dt.year
-orientados['año_orientado'] = pd.to_numeric(orientados['año_orientado'], errors='coerce').round().astype('Int64')
-
-talleres['mes_taller'] = talleres['fechaejecucion_taller'].dt.month
-talleres['mes_taller'] = pd.to_numeric(talleres['mes_taller'], errors='coerce').round().astype('Int64')
-
-talleres['año_taller'] = talleres['fechaejecucion_taller'].dt.year
-talleres['año_taller'] = pd.to_numeric(talleres['año_taller'], errors='coerce').round().astype('Int64')
+    Returns:
+        pd.DataFrame with normalised column names.
+    """
+    df = pd.read_excel(filepath, sheet_name=sheet_name)
+    df.columns = df.columns.str.lower()
+    return df
 
 
-# Remaning columns to lowercase
-registrados.columns = registrados.columns.str.replace('Número Documento','numerodocumento')
-psicologas.columns = psicologas.columns.str.replace('NUMERO.1','numerodocumento')
-psicologas = psicologas.drop('Unnamed: 22', axis=1)
+def load_talleres(filepath: str, sheet_name: str = "Reporte_Indicador_2") -> pd.DataFrame:
+    """
+    Read the 'talleres FIS' sheet from the SISE-psicología Excel file.
 
-for name in psicologas.columns:
-    psicologas[name] = psicologas[name].apply(lambda x: x.lower() if isinstance(x, str) else x)
+    Same normalisation as load_orientados().
 
-talleres = talleres.groupby('numerodocumento').agg({
-    'indicador': 'first',
-    'tipodireccionamiento': 'first', 
-    'tipodocumento': 'first', 
-    'correoelectronico': 'first', 
-    'primernombre': 'first', 
-    'segundonombre': 'first', 
-    'primerapellido': 'first',
-    'segundoapellido': 'first', 
-    'sexo': 'first', 
-    'ciudad': 'first', 
-    'departamento': 'first', 
-    'area': 'first', 
-    'tipo': 'first',
-    'subtipo': 'first', 
-    'nombreportafolio': 'first', 
-    'nombreconvocatoria': 'first',
-    'fechaagendamiento_taller': 'first', 
-    'fechaejecucion_taller': 'first',
-    'fechaevaluacion_taller': 'first', 
-    'aprobacion': 'first', 
-    'porcentajeasistencia': 'first',
-    'prestadornombre': 'first', 
-    'institucionnombre': 'first',
-    'instituciondireccion': 'first',
-    'institucionmunicipio': 'first', 
-    'instituciondepartamento': 'first',
-    'programagobiernosino': 'first', 
-    'programagobierno': lambda x: ','.join(map(str, x.dropna().unique())), 
-    'alianzasentidadesexternas': 'first',
-    'tallerista': 'first', 
-    'agencianombre': 'first', 
-    'numerotelefono': 'first',
-    'mes_taller': 'first',
-    'año_taller': 'first'
-}).reset_index()
+    Args:
+        filepath:   Path to the Excel file (or Kestra virtual path 'sise_psico').
+        sheet_name: Name of the sheet to read.
 
-# Adding the talleres data to orientados
-orientados = orientados.merge(talleres, on='numerodocumento',how='outer')
+    Returns:
+        pd.DataFrame with normalised column names.
+    """
+    df = pd.read_excel(filepath, sheet_name=sheet_name)
+    df.columns = df.columns.str.lower()
+    return df
 
-columns_to_merge = ['indicador', 'tipodireccionamiento', 'tipodocumento',
-       'correoelectronico', 'primernombre','segundonombre', 'primerapellido', 
-       'segundoapellido', 'sexo','ciudad', 'departamento', 'area', 'tipo', 'subtipo',
-       'nombreportafolio', 'nombreconvocatoria', 'aprobacion',
-       'porcentajeasistencia', 'prestadornombre', 'institucionnombre',
-       'instituciondireccion', 'institucionmunicipio',
-       'instituciondepartamento', 'programagobiernosino',
-       'programagobierno', 'alianzasentidadesexternas', 
-       'agencianombre', 'numerotelefono']
 
-for col in columns_to_merge:
-    orientados[col] = orientados[f'{col}_x'].combine_first(orientados[f'{col}_y'])
-    orientados.drop(columns=[f'{col}_x', f'{col}_y'], inplace=True)
+def load_registrados(filepath: str, sheet_name: str = "BD_Acumulado-2024-2026") -> pd.DataFrame:
+    """
+    Read the cumulative CV registrations Excel file.
 
-registrados = registrados.groupby('numerodocumento').agg({
-    'No. ': 'first',
-    'Programa / Aliado\n(Si aplica)': 'first',
-    'Barrio donde vive': 'first',
-    'Tipo Documento': 'first',
-    'TIPO_REGISTRO':'first',
-    'Nombres': 'first',
-    'Apellidos': 'first',
-    'Celular': 'first',
-    'Teléfono': 'first',
-    'Canal de Registro': 'first',
-    'Edad':'first',
-    'Rango_Edad': 'first',
-    'Género': 'first',
-    'Nivel de Estudio': 'first',
-    'Título Homologado':'first',
-    'Ciudad de Residencia':'first', 
-    'Email':'first',
-    'Fecha Registro' :'first',
-    'Programa de Gobierno': lambda x: ','.join(map(str, x.dropna().unique())),
-    'Condiciones Especiales': lambda x: ','.join(map(str, x.dropna().unique())),
-    'Detalle Discapacidades':'first', 
-    'Situación Laboral':'first', 
-    'Agente Registra':'first',
-    'Fecha Actualización':'first',
-    '% Hoja Vida':'first',
-    'Prestador Anterior':'first',
-    'Fecha Cambio Prestador':'first', 
-    'Vereda/Localidad/Centro Poblado':'first',
-    'Pertenece A':'first', 
-    'SISE_OFFLINE':'first', 
-    'Mes':'first',
-    'Año':'first', 
-    'Punto Atención':'first',
-}).reset_index()
+    Args:
+        filepath:   Path to the Excel file (or Kestra virtual path 'registries').
+        sheet_name: Name of the sheet to read.
 
-psicologas = psicologas.groupby('numerodocumento').agg({
-    'MES': 'first', 
-    'NUMERO': 'first', 
-    'FECHA': 'first', 
-    'ORIENTADOR': 'first', 
-    'NOMBRE': 'first', 
-    'TD': 'first',
-    'GENERO': 'first', 
-    'EDAD': 'first', 
-    'RANGO': 'first', 
-    'TELEFONO': 'first', 
-    'BARRIO': 'first',
-    'NIVEL DE FORMACIÓN': 'first', 
-    'FORMACIÓN': 'first', 
-    'EXPERIENCIA LABORAL': 'first',
-    'POBLACIÓN': lambda x: ','.join(map(str, x.dropna().unique())),
-    'CORREO ELECTRONICO': 'first', 
-    'TALLER FIS': lambda x: ','.join(map(str, x.dropna().unique())),
-    'OBSERVACIONES': 'first',
-    'INTÉRES CURSO FORMACIÓN': 'first', 
-    'VALIDACIÓN DE BACHILLERATO (SI / NO)': 'first',
-    'A TENER EN CUENTA': 'first'
-}).reset_index()
+    Returns:
+        Raw pd.DataFrame (column normalisation handled in clean_registrados()).
+    """
+    return pd.read_excel(filepath, sheet_name=sheet_name)
 
-# Merging data from registrados and psicologas into orientados
-orientados = orientados.merge(registrados[['numerodocumento', 'Programa de Gobierno','Condiciones Especiales']], on='numerodocumento', how='left')
 
-orientados = orientados.merge(psicologas[['numerodocumento','EDAD','POBLACIÓN']], on='numerodocumento', how='left')
+def load_psicologas(filepath: str, sheet_name: str = "Orientados") -> pd.DataFrame:
+    """
+    Read the psychologist tracking Excel file.
 
-orientados['Condiciones Especiales'] = orientados.apply(
-    lambda row: f"{row['Condiciones Especiales']}, {row['POBLACIÓN']}" if pd.notnull(row['POBLACIÓN']) else row['Condiciones Especiales'],
-    axis=1
-)
+    Drops the known spurious 'Unnamed: 22' column if present.
 
-orientados = orientados.drop('POBLACIÓN', axis=1)
+    Args:
+        filepath:   Path to the Excel file (or Kestra virtual path 'psicologist').
+        sheet_name: Name of the sheet to read.
 
-orientados.columns = orientados.columns.str.lower()
-orientados.columns = orientados.columns.str.replace(' ','_')
+    Returns:
+        pd.DataFrame ready for cleaning.
+    """
+    df = pd.read_excel(filepath, sheet_name=sheet_name)
+    if "Unnamed: 22" in df.columns:
+        df = df.drop("Unnamed: 22", axis=1)
+    return df
 
-orientados['edad'] = pd.to_numeric(orientados['edad'], errors='coerce').round().astype('Int64')
 
-# Cleaning column 'edad': 
-def range_age(age):
-    if  0 < age < 18:
-        return '< 18'
-    elif 18 <= age < 29:
-        return '18-28'
-    elif 29 <= age < 40:
-        return '29-39'
-    elif 40 <= age < 50:
-        return '40-49'
-    elif 50 <= age < 60:
-        return '50-59'
-    elif 60 <= age < 2000:
-        return '> 60'
-    else:
+# ---------------------------------------------------------------------------
+# 2. CLEANING
+# ---------------------------------------------------------------------------
+
+def clean_orientados(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Parse date columns, lowercase string values, and rename columns for
+    the orientados DataFrame.
+
+    Steps:
+      1. Parse 'fechaagendamiento', 'fechaejecucion', 'fechaevaluacion' as
+         datetime.
+      2. Lowercase all string cell values.
+      3. Rename columns to their semantic names.
+      4. Derive integer 'mes_orientado' and 'año_orientado' from
+         'fechaejecucion_orientacion'.
+
+    Args:
+        df: Raw orientados DataFrame from load_orientados().
+
+    Returns:
+        Cleaned and enriched DataFrame.
+    """
+    date_cols = ["fechaagendamiento", "fechaejecucion", "fechaevaluacion"]
+    for col in date_cols:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col])
+
+    for col in df.columns:
+        df[col] = df[col].apply(lambda x: x.lower() if isinstance(x, str) else x)
+
+    df = df.rename(columns={
+        "fechaagendamiento": "fechaagendamiento_orientacion",
+        "fechaejecucion":    "fechaejecucion_orientacion",
+        "fechaevaluacion":   "fechaevaluacion_orientacion",
+        "usuarionombre":     "orientador",
+    })
+
+    df["mes_orientado"] = (
+        pd.to_numeric(df["fechaejecucion_orientacion"].dt.month, errors="coerce")
+        .round()
+        .astype("Int64")
+    )
+    df["año_orientado"] = (
+        pd.to_numeric(df["fechaejecucion_orientacion"].dt.year, errors="coerce")
+        .round()
+        .astype("Int64")
+    )
+    return df
+
+
+def clean_talleres(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Parse date columns, lowercase string values, rename columns, and
+    derive 'mes_taller' / 'año_taller' for the talleres DataFrame.
+
+    Then aggregate to one row per 'numerodocumento', keeping the first
+    value for most fields and joining unique 'programagobierno' values
+    with commas.
+
+    Args:
+        df: Raw talleres DataFrame from load_talleres().
+
+    Returns:
+        Aggregated and cleaned DataFrame (one row per person).
+    """
+    date_cols = ["fechaagendamiento", "fechaejecucion", "fechaevaluacion"]
+    for col in date_cols:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col])
+
+    for col in df.columns:
+        df[col] = df[col].apply(lambda x: x.lower() if isinstance(x, str) else x)
+
+    df = df.rename(columns={
+        "fechaagendamiento": "fechaagendamiento_taller",
+        "fechaejecucion":    "fechaejecucion_taller",
+        "fechaevaluacion":   "fechaevaluacion_taller",
+        "usuarionombre":     "tallerista",
+    })
+
+    df["mes_taller"] = (
+        pd.to_numeric(df["fechaejecucion_taller"].dt.month, errors="coerce")
+        .round()
+        .astype("Int64")
+    )
+    df["año_taller"] = (
+        pd.to_numeric(df["fechaejecucion_taller"].dt.year, errors="coerce")
+        .round()
+        .astype("Int64")
+    )
+
+    first_cols = [
+        "indicador", "tipodireccionamiento", "tipodocumento", "correoelectronico",
+        "primernombre", "segundonombre", "primerapellido", "segundoapellido",
+        "sexo", "ciudad", "departamento", "area", "tipo", "subtipo",
+        "nombreportafolio", "nombreconvocatoria", "fechaagendamiento_taller",
+        "fechaejecucion_taller", "fechaevaluacion_taller", "aprobacion",
+        "porcentajeasistencia", "prestadornombre", "institucionnombre",
+        "instituciondireccion", "institucionmunicipio", "instituciondepartamento",
+        "programagobiernosino", "alianzasentidadesexternas", "tallerista",
+        "agencianombre", "numerotelefono", "mes_taller", "año_taller",
+    ]
+    agg_spec = {col: "first" for col in first_cols if col in df.columns}
+    if "programagobierno" in df.columns:
+        agg_spec["programagobierno"] = lambda x: ",".join(map(str, x.dropna().unique()))
+
+    return df.groupby("numerodocumento").agg(agg_spec).reset_index()
+
+
+def clean_registrados(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Rename the key identifier columns in the registrados DataFrame and
+    aggregate to one row per 'numerodocumento'.
+
+    'Programa de Gobierno' and 'Condiciones Especiales' are joined across
+    multiple rows with commas so no information is lost.
+
+    Args:
+        df: Raw registrados DataFrame from load_registrados().
+
+    Returns:
+        Aggregated DataFrame (one row per person).
+    """
+    df.columns = df.columns.str.replace("Número Documento", "numerodocumento")
+
+    first_cols = [
+        "No. ", "Programa / Aliado\n(Si aplica)", "Barrio donde vive",
+        "Tipo Documento", "TIPO_REGISTRO", "Nombres", "Apellidos", "Celular",
+        "Teléfono", "Canal de Registro", "Edad", "Rango_Edad", "Género",
+        "Nivel de Estudio", "Título Homologado", "Ciudad de Residencia",
+        "Email", "Fecha Registro", "Detalle Discapacidades", "Situación Laboral",
+        "Agente Registra", "Fecha Actualización", "% Hoja Vida",
+        "Prestador Anterior", "Fecha Cambio Prestador",
+        "Vereda/Localidad/Centro Poblado", "Pertenece A", "SISE_OFFLINE",
+        "Mes", "Año", "Punto Atención",
+    ]
+    agg_spec = {col: "first" for col in first_cols if col in df.columns}
+    for col in ["Programa de Gobierno", "Condiciones Especiales"]:
+        if col in df.columns:
+            agg_spec[col] = lambda x: ",".join(map(str, x.dropna().unique()))
+
+    return df.groupby("numerodocumento").agg(agg_spec).reset_index()
+
+
+def clean_psicologas(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Rename the key identifier column in the psicologas DataFrame,
+    lowercase all string values, and aggregate to one row per
+    'numerodocumento'.
+
+    'POBLACIÓN' and 'TALLER FIS' are joined with commas across rows.
+
+    Args:
+        df: Raw psicologas DataFrame from load_psicologas().
+
+    Returns:
+        Aggregated DataFrame (one row per person).
+    """
+    df.columns = df.columns.str.replace("NUMERO.1", "numerodocumento")
+
+    for col in df.columns:
+        df[col] = df[col].apply(lambda x: x.lower() if isinstance(x, str) else x)
+
+    first_cols = [
+        "MES", "NUMERO", "FECHA", "ORIENTADOR", "NOMBRE", "TD", "GENERO",
+        "EDAD", "RANGO", "TELEFONO", "BARRIO", "NIVEL DE FORMACIÓN",
+        "FORMACIÓN", "EXPERIENCIA LABORAL", "CORREO ELECTRONICO",
+        "OBSERVACIONES", "INTÉRES CURSO FORMACIÓN",
+        "VALIDACIÓN DE BACHILLERATO (SI / NO)", "A TENER EN CUENTA",
+    ]
+    agg_spec = {col: "first" for col in first_cols if col in df.columns}
+    for col in ["POBLACIÓN", "TALLER FIS"]:
+        if col in df.columns:
+            agg_spec[col] = lambda x: ",".join(map(str, x.dropna().unique()))
+
+    return df.groupby("numerodocumento").agg(agg_spec).reset_index()
+
+
+# ---------------------------------------------------------------------------
+# 3. MERGING
+# ---------------------------------------------------------------------------
+
+def merge_all(
+    orientados: pd.DataFrame,
+    talleres:   pd.DataFrame,
+    registrados: pd.DataFrame,
+    psicologas:  pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Merge all four source DataFrames into a single wide DataFrame.
+
+    Merge order:
+      1. orientados  ← talleres        (outer join on numerodocumento)
+         Duplicate columns from the join (suffix _x / _y) are resolved
+         with combine_first() so that orientados values take precedence.
+      2. result      ← registrados     (left join; brings in 'Programa de
+         Gobierno' and 'Condiciones Especiales')
+      3. result      ← psicologas      (left join; brings in 'EDAD' and
+         'POBLACIÓN')
+      4. 'POBLACIÓN' is appended to 'condiciones_especiales' then dropped.
+      5. All column names are lowercased and spaces replaced by underscores.
+      6. 'edad' is coerced to nullable Int64.
+
+    Args:
+        orientados:  Cleaned orientados DataFrame.
+        talleres:    Cleaned talleres DataFrame.
+        registrados: Cleaned registrados DataFrame.
+        psicologas:  Cleaned psicologas DataFrame.
+
+    Returns:
+        Merged DataFrame ready for classification.
+    """
+    # --- 1. orientados + talleres (outer) ---
+    df = orientados.merge(talleres, on="numerodocumento", how="outer")
+
+    shared_cols = [
+        "indicador", "tipodireccionamiento", "tipodocumento", "correoelectronico",
+        "primernombre", "segundonombre", "primerapellido", "segundoapellido",
+        "sexo", "ciudad", "departamento", "area", "tipo", "subtipo",
+        "nombreportafolio", "nombreconvocatoria", "aprobacion",
+        "porcentajeasistencia", "prestadornombre", "institucionnombre",
+        "instituciondireccion", "institucionmunicipio", "instituciondepartamento",
+        "programagobiernosino", "programagobierno", "alianzasentidadesexternas",
+        "agencianombre", "numerotelefono",
+    ]
+    for col in shared_cols:
+        x, y = f"{col}_x", f"{col}_y"
+        if x in df.columns and y in df.columns:
+            df[col] = df[x].astype(object).combine_first(df[y].astype(object))
+            df.drop(columns=[x, y], inplace=True)
+
+    # --- 2. + registrados ---
+    df = df.merge(
+        registrados[["numerodocumento", "Programa de Gobierno", "Condiciones Especiales"]],
+        on="numerodocumento", how="left",
+    )
+
+    # --- 3. + psicologas ---
+    df = df.merge(
+        psicologas[["numerodocumento", "EDAD", "POBLACIÓN"]],
+        on="numerodocumento", how="left",
+    )
+
+    # --- 4. Enrich condiciones_especiales with POBLACIÓN ---
+    df["Condiciones Especiales"] = df.apply(
+        lambda row: (
+            f"{row['Condiciones Especiales']}, {row['POBLACIÓN']}"
+            if pd.notnull(row["POBLACIÓN"])
+            else row["Condiciones Especiales"]
+        ),
+        axis=1,
+    )
+    df = df.drop("POBLACIÓN", axis=1)
+
+    # --- 5. Normalise column names ---
+    df.columns = df.columns.str.lower().str.replace(" ", "_")
+
+    # --- 6. Coerce edad ---
+    df["edad"] = pd.to_numeric(df["edad"], errors="coerce").round().astype("Int64")
+
+    return df
+
+
+# ---------------------------------------------------------------------------
+# 4. DERIVED COLUMNS
+# ---------------------------------------------------------------------------
+
+def derive_age_range(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add a 'rango_de_edad' column based on the 'edad' column.
+
+    Bands:
+      <18 | 18-28 | 29-39 | 40-49 | 50-59 | >60
+
+    Args:
+        df: DataFrame with an integer 'edad' column.
+
+    Returns:
+        DataFrame with 'rango_de_edad' added.
+    """
+    def _band(age) -> str | float:
+        try:
+            age = int(age)
+        except (TypeError, ValueError):
+            return np.nan
+        if 0 < age < 18:   return "< 18"
+        if 18 <= age < 29:  return "18-28"
+        if 29 <= age < 40:  return "29-39"
+        if 40 <= age < 50:  return "40-49"
+        if 50 <= age < 60:  return "50-59"
+        if 60 <= age < 2000: return "> 60"
         return np.nan
 
-orientados['rango_de_edad'] = orientados['edad'].apply(range_age)
+    df["rango_de_edad"] = df["edad"].apply(_band)
+    return df
 
 
-# # GRUPOS ETNICOS
-# Ensure conditions are strings and lowercase
-orientados['condiciones_especiales'] = orientados['condiciones_especiales'].astype(str).str.lower().fillna('')
+# ---------------------------------------------------------------------------
+# 5. POPULATION CLASSIFICATION
+# ---------------------------------------------------------------------------
 
-# Define filters
-filter_afro = orientados['condiciones_especiales'].str.contains('negr|afro|mulat|palen', regex=True)
-filter_raizal = orientados['condiciones_especiales'].str.contains('raiz', regex=True)
-filter_indig = orientados['condiciones_especiales'].str.contains('indí', regex=True)
-filter_git = orientados['condiciones_especiales'].str.contains('git', regex=True)
+def classify_ethnic_groups(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Derive the 'grupos_etnicos' column from 'condiciones_especiales'.
 
-def get_ethnic_groups(row):
-    groups = []
-    if filter_afro[row.name]: groups.append("Afrodescendiente")
-    if filter_raizal[row.name]: groups.append("Raizal y/o Isleño")
-    if filter_indig[row.name]: groups.append("Indígenas")
-    if filter_git[row.name]: groups.append("Gitano")
-    return groups if groups else np.nan  # Use NaN for empty lists
+    See registro_hv.py for full pattern documentation.
 
-# Apply the function
-orientados["grupos_etnicos"] = orientados.apply(get_ethnic_groups, axis=1)
+    Args:
+        df: DataFrame with 'condiciones_especiales' column.
 
-# # VICTIMAS DEL CONFLICTO ARMADO
-# Poblacion VCA 
-orientados['programa_de_gobierno'].astype(str)
-orientados['programa_de_gobierno'] = orientados['programa_de_gobierno'].fillna('')
+    Returns:
+        DataFrame with 'grupos_etnicos' column added.
+    """
+    df["condiciones_especiales"] = (
+        df["condiciones_especiales"].astype(str).str.lower().fillna("")
+    )
 
-orientados['vca'] = pd.Series(dtype='object') # Adding a new column
+    patterns = {
+        "Afrodescendiente":  r"negr|afro|mulat|palen",
+        "Raizal y/o Isleño": r"raiz",
+        "Indígenas":         r"indí",
+        "Gitano":            r"git",
+    }
 
-filter_vca = (
-    (orientados['programa_de_gobierno'].str.contains('armado', na=False)) |
-    (orientados['condiciones_especiales'].str.contains('vca|v.c.a'))
-)
+    def _classify(text: str):
+        groups = [
+            label for label, pat in patterns.items()
+            if pd.Series([text]).str.contains(pat, regex=True).iloc[0]
+        ]
+        return groups if groups else np.nan
 
-orientados.loc[filter_vca,'vca'] = 'VCA'
-
-
-# # PERSONAS EN CONDICION DE DISCAPACIDAD
-
-# Initialize the column with NaN directly
-orientados['discapacidad'] = pd.Series([np.nan] * len(orientados), dtype='object')
-
-# Mapping of patterns to labels
-discapacidad_patterns = {
-    r'capacidad': 'Discapacidad',
-    r'ognitiv|telect': 'Cognitiva o Intelectual',
-    r'[ií]sic': 'Física',
-    r'visual': 'Visual',
-    r'auditiva': 'Auditiva',
-    r'múltiple': 'Múltiple',
-    r'sordoceguera': 'Sordoceguera',
-    r'psicosocial': 'Psicosocial'
-}
-
-# Apply the patterns
-for pattern, label in discapacidad_patterns.items():
-    mask = orientados['condiciones_especiales'].str.contains(pattern, case=False, na=False)
-    orientados.loc[mask, 'discapacidad'] = label
+    df["grupos_etnicos"] = df["condiciones_especiales"].apply(_classify)
+    return df
 
 
-# # MIGRANTES
+def classify_vca(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Flag victims of the armed conflict ('VCA').
 
-# Migrant and internally displaced people
-orientados['migrante'] = ""
+    Condition: 'programa_de_gobierno' contains 'armado'  OR
+               'condiciones_especiales' contains 'vca' / 'v.c.a'.
 
-# Filters applied
-filter_mig = (
-    (orientados['condiciones_especiales'].str.contains('migr|retor')) |
-    (orientados['tipodocumento'].str.contains('dni|ppt|ce'))
-)
+    Args:
+        df: DataFrame with both relevant columns.
 
-orientados.loc[filter_mig,"migrante"] = "Migrante o Retornado"
+    Returns:
+        DataFrame with 'vca' column added.
+    """
+    df["programa_de_gobierno"] = df["programa_de_gobierno"].fillna("").astype(str)
+    df["vca"] = pd.Series(dtype="object")
 
-# Replace empty strings with NaN
-orientados['migrante'] = orientados['migrante'].replace("", np.nan)
-
-
-# # VÍCTIMA DE VIOLENCIA 
-# Population VVG
-orientados['vvg'] = ""
-
-# Filters applied
-filter_vvg = (
-    (orientados['condiciones_especiales'].str.contains('viole')) |
-    (orientados['condiciones_especiales'].str.contains('vvg'))     
-)
-
-orientados.loc[filter_vvg,"vvg"] = "vvg"
-
-# Replace empty strings with NaN
-orientados['vvg'] = orientados['vvg'].replace("",  np.nan)
-
-# # REINSERTADOS
-# Reincorporados
-orientados['reincorporados'] = ""
-
-# Filters applied
-filter_rei = (
-    (orientados['condiciones_especiales'].str.contains('rein'))
-)
-
-orientados.loc[filter_rei,"reincorporados"] = "reincorporados"
-
-# Replace empty strings with NaN
-orientados['reincorporados'] = orientados['reincorporados'].replace("", np.nan)
-
-# # Final cleaning
-for col in orientados.columns:
-    if orientados[col].dtype == 'object':
-        orientados[col] = orientados[col].astype(str)
-        orientados[col] = [str(i).lower() for i in orientados[col]]
-        orientados[col] = [str(i).strip() for i in orientados[col]]
-
-orientados = orientados.replace('nan',pd.NA)
+    mask = (
+        df["programa_de_gobierno"].str.contains("armado", na=False) |
+        df["condiciones_especiales"].str.contains(r"vca|v\.c\.a", na=False)
+    )
+    df.loc[mask, "vca"] = "VCA"
+    return df
 
 
-# # Reportes de población
-# Personas orientadas
-f_orientado = (orientados['mes_orientado'] == prev_month) & (orientados['año_orientado'] == prev_year)
-oriented = orientados[f_orientado]
+def classify_disability(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Classify disability type from 'condiciones_especiales'.
 
-print(f"El número de hombres orientados durante el mes {prev_month} es: {orientados[f_orientado & (orientados['sexo']=='m')]['sexo'].count()}")
-print(f"El número de mujeres orientadas durante el mes {prev_month} es: {orientados[f_orientado & (orientados['sexo']=='f')]['sexo'].count()}")
-print()
+    The first matching pattern wins; 'capacidad' is the catch-all and
+    is intentionally placed last.
 
-print(f"El número de PCD orientadas durante el mes {prev_month} es: {orientados[f_orientado]['discapacidad'].count()}")
-print(f"El número de victimas orientadas durante el mes {prev_month} es: {orientados[f_orientado]['vca'].count()}")
-print(f"El número de victimas de violencia de género orientadas durante el mes {prev_month} es: {orientados[f_orientado]['vvg'].count()}")
-print(f"El número de migrantes orientadas durante el mes {prev_month} es: {orientados[f_orientado]['migrante'].count()}")
-print(f"El número de personas de grupos étnicos orientadas durante el mes {prev_month} es: {orientados[f_orientado]['grupos_etnicos'].count()}")
-print(f"El número de reincorporados orientados durante el mes {prev_month} es: {orientados[f_orientado]['reincorporados'].count()}")
-print()
+    Args:
+        df: DataFrame with 'condiciones_especiales' column.
 
-print(f"El número de adultos mayores orientados durante el mes {prev_month} es: {orientados[f_orientado & (orientados['edad'] >= 60)]['sexo'].count()}")
-print(f"El número de adultos orientados durante el mes {prev_month} es: {orientados[f_orientado & (orientados['edad'] >= 29) & (orientados['edad'] < 60)]['sexo'].count()}")
-print(f"El número de jovenes orientados durante el mes {prev_month} es: {orientados[f_orientado & (orientados['edad'] <= 28)]['sexo'].count()}")
+    Returns:
+        DataFrame with 'discapacidad' column added.
+    """
+    df["discapacidad"] = pd.Series([np.nan] * len(df), dtype="object")
+
+    patterns = {
+        r"ognitiv|telect": "Cognitiva o Intelectual",
+        r"[ií]sic":        "Física",
+        r"visual":         "Visual",
+        r"auditiva":       "Auditiva",
+        r"múltiple":       "Múltiple",
+        r"sordoceguera":   "Sordoceguera",
+        r"psicosocial":    "Psicosocial",
+        r"capacidad":      "Discapacidad",
+    }
+
+    for pattern, label in patterns.items():
+        unclassified = df["discapacidad"].isna()
+        mask = unclassified & df["condiciones_especiales"].str.contains(
+            pattern, case=False, na=False
+        )
+        df.loc[mask, "discapacidad"] = label
+
+    return df
 
 
-# Personas taller FIS
-f_taller = (orientados['mes_taller'] == prev_month) & (orientados['año_taller'] == prev_year)
-workshops = orientados[f_taller]
+def classify_migrants(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Flag migrants and returnees ('Migrante o Retornado').
 
-print(f"El número de hombres on taller FIS durante el mes {prev_month} es: {orientados[f_taller & (orientados['sexo']=='m')]['sexo'].count()}")
-print(f"El número de mujeres on taller FIS durante el mes {prev_month} es: {orientados[f_taller & (orientados['sexo']=='f')]['sexo'].count()}")
-print()
+    Condition: 'condiciones_especiales' contains 'migr'/'retor'  OR
+               'tipodocumento' contains 'dni', 'ppt', or 'ce'
+               (fragments of common migrant document types).
 
-print(f"El número de PCD con taller FIS durante el mes {prev_month} es: {orientados[f_taller]['discapacidad'].count()}")
-print(f"El número de victimas con taller FIS durante el mes {prev_month} es: {orientados[f_taller]['vca'].count()}")
-print(f"El número de victimas de violencia de género con taller FIS durante el mes {prev_month} es: {orientados[f_taller]['vvg'].count()}")
-print(f"El número de migrantes con taller FIS durante el mes {prev_month} es: {orientados[f_taller]['migrante'].count()}")
-print(f"El número de personas de grupos étnicos con taller FIS durante el mes {prev_month} es: {orientados[f_taller]['grupos_etnicos'].count()}")
-print(f"El número de reincorporados con taller FIS durante el mes {prev_month} es: {orientados[f_taller]['reincorporados'].count()}")
-print()
+    Args:
+        df: DataFrame with 'condiciones_especiales' and 'tipodocumento'.
 
-print(f"El número de adultos mayores con taller FIS durante el mes {prev_month} es: {orientados[f_taller & (orientados['edad'] >= 60)]['sexo'].count()}")
-print(f"El número de adultos con taller FIS durante el mes {prev_month} es: {orientados[f_taller & (orientados['edad'] >= 29) & (orientados['edad'] < 60)]['sexo'].count()}")
-print(f"El número de jovenes con taller FIS durante el mes {prev_month} es: {orientados[f_taller & (orientados['edad'] <= 28)]['sexo'].count()}")
+    Returns:
+        DataFrame with 'migrante' column added.
+    """
+    df["migrante"] = ""
+    mask = (
+        df["condiciones_especiales"].str.contains(r"migr|retor", na=False) |
+        df["tipodocumento"].str.contains(r"dni|ppt|ce", na=False)
+    )
+    df.loc[mask, "migrante"] = "Migrante o Retornado"
+    df["migrante"] = df["migrante"].where(df["migrante"] != "", other=pd.NA)
+    return df
 
-# Exporting the data
-f_export = (orientados['mes_orientado'] == prev_month) | (orientados['mes_taller'] == prev_month) & (orientados['año_taller'] == prev_year)
-oriented_workshops = orientados[f_export]
-oriented_workshops.to_parquet(f'orientados_{prev_year}_{prev_month}.parquet', compression='zstd')
 
-# Counting the number of valid records processed
-num_oriented_records = oriented.shape[0]
-print(f"Number of people attended by psicologist during {prev_month}/{prev_year}: {num_oriented_records}")
-# Output the count
-with open('psico_count.txt', 'w') as f:
-    f.write(str(num_oriented_records))
+def classify_vvg(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Flag victims of gender-based violence ('vvg').
 
-num_workshops_records = workshops.shape[0]
-print(f"Number of people who attended workshops during {prev_month}/{prev_year}: {num_workshops_records}")
-with open('workshop_count.txt', 'w') as f:
-    f.write(str(num_workshops_records))
+    Condition: 'condiciones_especiales' contains 'viole' or 'vvg'.
+
+    Args:
+        df: DataFrame with 'condiciones_especiales' column.
+
+    Returns:
+        DataFrame with 'vvg' column added.
+    """
+    df["vvg"] = ""
+    mask = df["condiciones_especiales"].str.contains(r"viole|vvg", na=False)
+    df.loc[mask, "vvg"] = "vvg"
+    df["vvg"] = df["vvg"].where(df["vvg"] != "", other=pd.NA)
+    return df
+
+
+def classify_reintegrated(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Flag people in a reintegration/reincorporation programme.
+
+    Condition: 'condiciones_especiales' contains 'rein'.
+
+    Args:
+        df: DataFrame with 'condiciones_especiales' column.
+
+    Returns:
+        DataFrame with 'reincorporados' column added.
+    """
+    df["reincorporados"] = ""
+    mask = df["condiciones_especiales"].str.contains("rein", na=False)
+    df.loc[mask, "reincorporados"] = "reincorporados"
+    df["reincorporados"] = df["reincorporados"].where(df["reincorporados"] != "", other=pd.NA)
+    return df
+
+
+def run_all_classifications(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convenience wrapper: run all six population-classification steps
+    in the correct order.
+
+    Args:
+        df: Merged and date-parsed DataFrame.
+
+    Returns:
+        DataFrame with all classification columns added.
+    """
+    df = classify_ethnic_groups(df)
+    df = classify_vca(df)
+    df = classify_disability(df)
+    df = classify_migrants(df)
+    df = classify_vvg(df)
+    df = classify_reintegrated(df)
+    return df
+
+
+# ---------------------------------------------------------------------------
+# 6. FINAL CLEANING
+# ---------------------------------------------------------------------------
+
+def final_string_clean(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Lowercase and strip all object columns, then replace the string
+    'nan' with pd.NA.
+
+    Args:
+        df: Fully classified DataFrame.
+
+    Returns:
+        Cleaned DataFrame.
+    """
+    for col in df.columns:
+        if (
+            df[col].dtype == object
+            or pd.api.types.is_string_dtype(df[col])
+        ) and not pd.api.types.is_bool_dtype(df[col]):
+            df[col] = df[col].astype(str).str.lower().str.strip()
+    df = df.replace("nan", pd.NA)
+    return df
+
+
+# ---------------------------------------------------------------------------
+# 7. FILTERING & EXPORT
+# ---------------------------------------------------------------------------
+
+def filter_orientados_by_month(df: pd.DataFrame, month: int, year: int) -> pd.DataFrame:
+    """
+    Keep rows where 'fechaejecucion_orientacion' falls in month/year.
+
+    Args:
+        df:    Fully transformed DataFrame.
+        month: Target month (1–12).
+        year:  Target year.
+
+    Returns:
+        Filtered DataFrame.
+    """
+    mask = (df["mes_orientado"] == month) & (df["año_orientado"] == year)
+    return df[mask].copy()
+
+
+def filter_talleres_by_month(df: pd.DataFrame, month: int, year: int) -> pd.DataFrame:
+    """
+    Keep rows where 'fechaejecucion_taller' falls in month/year.
+
+    Args:
+        df:    Fully transformed DataFrame.
+        month: Target month (1–12).
+        year:  Target year.
+
+    Returns:
+        Filtered DataFrame.
+    """
+    mask = (df["mes_taller"] == month) & (df["año_taller"] == year)
+    return df[mask].copy()
+
+
+def filter_export(df: pd.DataFrame, month: int, year: int) -> pd.DataFrame:
+    """
+    Keep rows that appear in the target month either as an orientation
+    session OR as a taller session.
+
+    This mirrors the original export filter:
+        (mes_orientado == month) | (mes_taller == month AND año_taller == year)
+
+    Args:
+        df:    Fully transformed DataFrame.
+        month: Target month (1–12).
+        year:  Target year.
+
+    Returns:
+        Filtered DataFrame for export.
+    """
+    mask = (
+        (df["mes_orientado"] == month) |
+        ((df["mes_taller"] == month) & (df["año_taller"] == year))
+    )
+    return df[mask].copy()
+
+
+def export_parquet(df: pd.DataFrame, month: int, year: int) -> str:
+    """
+    Export the monthly DataFrame to a compressed parquet file.
+
+    Filename pattern: orientados_<year>_<month>.parquet
+
+    Args:
+        df:    Monthly DataFrame to export.
+        month: Integer month used in the filename.
+        year:  Integer year used in the filename.
+
+    Returns:
+        The filename that was written.
+    """
+    filename = f"orientados_{year}_{month}.parquet"
+    df.to_parquet(filename, compression="zstd")
+    return filename
+
+
+def write_count(count: int, filepath: str) -> None:
+    """
+    Write a record count to a plain-text file for Kestra outputFiles.
+
+    Args:
+        count:    Number of records.
+        filepath: Destination filename (e.g. 'psico_count.txt').
+    """
+    with open(filepath, "w") as f:
+        f.write(str(count))
+
+
+# ---------------------------------------------------------------------------
+# 8. REPORTING
+# ---------------------------------------------------------------------------
+
+def print_summary(df: pd.DataFrame, month: int, year: int) -> None:
+    """
+    Print population breakdowns for psychological orientation sessions
+    and FIS workshops held during month/year.
+
+    Args:
+        df:    Fully transformed DataFrame (all months).
+        month: Month to summarise.
+        year:  Year to summarise.
+    """
+    def _count(mask) -> int:
+        return int(mask.sum())
+
+    for label, f_month in [
+        ("orientados", (df["mes_orientado"] == month) & (df["año_orientado"] == year)),
+        ("taller FIS", (df["mes_taller"]    == month) & (df["año_taller"]    == year)),
+    ]:
+        print(f"\n--- {label} mes {month}/{year} ---")
+        print(f"  Hombres:   {_count(f_month & (df['sexo'] == 'm'))}")
+        print(f"  Mujeres:   {_count(f_month & (df['sexo'] == 'f'))}")
+        print(f"  PCD:       {_count(f_month & df['discapacidad'].notna())}")
+        print(f"  VCA:       {_count(f_month & df['vca'].notna())}")
+        print(f"  VVG:       {_count(f_month & df['vvg'].notna())}")
+        print(f"  Migrantes: {_count(f_month & df['migrante'].notna())}")
+        print(f"  Étnicos:   {_count(f_month & df['grupos_etnicos'].notna())}")
+        print(f"  Reinc.:    {_count(f_month & df['reincorporados'].notna())}")
+        print(f"  ≥60 años:  {_count(f_month & (df['edad'] >= 60))}")
+        print(f"  29-59:     {_count(f_month & (df['edad'] >= 29) & (df['edad'] < 60))}")
+        print(f"  ≤28 años:  {_count(f_month & (df['edad'] <= 28))}")
+
+
+# ---------------------------------------------------------------------------
+# 9. MAIN PIPELINE ORCHESTRATOR
+# ---------------------------------------------------------------------------
+
+def run_pipeline(
+    sise_psico_path: str,
+    registries_path: str,
+    psicologist_path: str,
+    month: int,
+    year: int,
+) -> pd.DataFrame:
+    """
+    Execute the full ETL pipeline and return the combined monthly DataFrame.
+
+    Steps:
+        1.  load_orientados / load_talleres / load_registrados / load_psicologas
+        2.  clean_orientados / clean_talleres / clean_registrados / clean_psicologas
+        3.  merge_all
+        4.  derive_age_range
+        5.  run_all_classifications
+        6.  final_string_clean
+
+    The returned DataFrame contains ALL months; use filter_orientados_by_month(),
+    filter_talleres_by_month(), or filter_export() to slice it.
+
+    Args:
+        sise_psico_path:  Path to the SISE-psicología Excel file.
+        registries_path:  Path to the cumulative registrations Excel file.
+        psicologist_path: Path to the psychologist tracking Excel file.
+        month:            Target month (1–12).
+        year:             Target year.
+
+    Returns:
+        Fully processed DataFrame.
+    """
+    orientados  = clean_orientados(load_orientados(sise_psico_path))
+    talleres    = clean_talleres(load_talleres(sise_psico_path))
+    registrados = clean_registrados(load_registrados(registries_path))
+    psicologas  = clean_psicologas(load_psicologas(psicologist_path))
+
+    df = merge_all(orientados, talleres, registrados, psicologas)
+    df = derive_age_range(df)
+    df = run_all_classifications(df)
+    df = final_string_clean(df)
+    return df
+
+
+def main():
+    """
+    Entry point when the script is run directly (or by Kestra).
+
+    Reads MONTH and YEAR from environment variables, executes the full
+    pipeline against the Kestra virtual paths, writes parquet output and
+    count text files, and prints a summary.
+    """
+    month = int(os.getenv("MONTH"))
+    year  = int(os.getenv("YEAR"))
+
+    df = run_pipeline("sise_psico", "registries", "psicologist", month, year)
+
+    print_summary(df, month, year)
+
+    oriented  = filter_orientados_by_month(df, month, year)
+    workshops = filter_talleres_by_month(df, month, year)
+    export_df = filter_export(df, month, year)
+
+    filename = export_parquet(export_df, month, year)
+
+    num_oriented  = len(oriented)
+    num_workshops = len(workshops)
+
+    print(f"\nNumber of people attended by psychologist during {month}/{year}: {num_oriented}")
+    write_count(num_oriented, "psico_count.txt")
+
+    print(f"Number of people who attended workshops during {month}/{year}: {num_workshops}")
+    write_count(num_workshops, "workshop_count.txt")
+
+    print(f"Output written to: {filename}")
+
+
+if __name__ == "__main__":
+    main()
