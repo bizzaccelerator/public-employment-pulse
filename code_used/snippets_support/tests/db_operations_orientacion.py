@@ -187,9 +187,9 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         )
 
     # 5. numpy NaN → None in object/string columns only.
-    obj_cols = df.select_dtypes(include=["object", "string"]).columns
-    for col in obj_cols:
-        df[col] = df[col].where(df[col].notna(), other=None)
+    str_cols = df.select_dtypes(include=["object", "string", "str"]).columns
+    for col in str_cols:
+        df[col] = df[col].astype(object).where(df[col].notna(), other=None)
 
     return df
 
