@@ -347,10 +347,16 @@ class TestColumnMapping:
                 "grupos_etnicos still contains list values after prepare_dataframe()"
 
     def test_no_numpy_nan_remains(self, fixture_files):
-        """SQLAlchemy needs Python None for NULL, not numpy NaN."""
+        """
+        SQLAlchemy needs Python None for NULL, not numpy NaN.
+        Checks only string/object columns — numeric columns may legitimately
+        hold NaN before the DB layer converts them to None.
+        Also uses include=["object", "string"] for pandas 3.x compatibility
+        (StringDtype columns are no longer captured by include="object" alone).
+        """
         df = _pipeline(fixture_files, month=3, year=2025)
         prepared = prepare_dataframe(df.copy())
-        for col in prepared.select_dtypes(include="object").columns:
+        for col in prepared.select_dtypes(include=["object", "string"]).columns:
             has_numpy_nan = prepared[col].apply(
                 lambda x: isinstance(x, float) and np.isnan(x)
             ).any()

@@ -503,7 +503,7 @@ def classify_migrants(df: pd.DataFrame) -> pd.DataFrame:
         df["tipodocumento"].str.contains(r"dni|ppt|ce", na=False)
     )
     df.loc[mask, "migrante"] = "Migrante o Retornado"
-    df["migrante"] = df["migrante"].replace("", np.nan).infer_objects(copy=False)
+    df["migrante"] = df["migrante"].where(df["migrante"] != "", other=pd.NA)
     return df
 
 
@@ -522,7 +522,7 @@ def classify_vvg(df: pd.DataFrame) -> pd.DataFrame:
     df["vvg"] = ""
     mask = df["condiciones_especiales"].str.contains(r"viole|vvg", na=False)
     df.loc[mask, "vvg"] = "vvg"
-    df["vvg"] = df["vvg"].replace("", np.nan).infer_objects(copy=False)
+    df["vvg"] = df["vvg"].where(df["vvg"] != "", other=pd.NA)
     return df
 
 
@@ -541,7 +541,7 @@ def classify_reintegrated(df: pd.DataFrame) -> pd.DataFrame:
     df["reincorporados"] = ""
     mask = df["condiciones_especiales"].str.contains("rein", na=False)
     df.loc[mask, "reincorporados"] = "reincorporados"
-    df["reincorporados"] = df["reincorporados"].replace("", np.nan).infer_objects(copy=False)
+    df["reincorporados"] = df["reincorporados"].where(df["reincorporados"] != "", other=pd.NA)
     return df
 
 
