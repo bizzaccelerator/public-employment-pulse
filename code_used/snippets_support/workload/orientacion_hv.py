@@ -316,7 +316,7 @@ def merge_all(
     for col in shared_cols:
         x, y = f"{col}_x", f"{col}_y"
         if x in df.columns and y in df.columns:
-            df[col] = df[x].combine_first(df[y])
+            df[col] = df[x].astype(object).combine_first(df[y].astype(object))
             df.drop(columns=[x, y], inplace=True)
 
     # --- 2. + registrados ---
@@ -503,7 +503,7 @@ def classify_migrants(df: pd.DataFrame) -> pd.DataFrame:
         df["tipodocumento"].str.contains(r"dni|ppt|ce", na=False)
     )
     df.loc[mask, "migrante"] = "Migrante o Retornado"
-    df["migrante"] = df["migrante"].replace("", np.nan)
+    df["migrante"] = df["migrante"].replace("", np.nan).infer_objects(copy=False)
     return df
 
 
@@ -522,7 +522,7 @@ def classify_vvg(df: pd.DataFrame) -> pd.DataFrame:
     df["vvg"] = ""
     mask = df["condiciones_especiales"].str.contains(r"viole|vvg", na=False)
     df.loc[mask, "vvg"] = "vvg"
-    df["vvg"] = df["vvg"].replace("", np.nan)
+    df["vvg"] = df["vvg"].replace("", np.nan).infer_objects(copy=False)
     return df
 
 
@@ -541,7 +541,7 @@ def classify_reintegrated(df: pd.DataFrame) -> pd.DataFrame:
     df["reincorporados"] = ""
     mask = df["condiciones_especiales"].str.contains("rein", na=False)
     df.loc[mask, "reincorporados"] = "reincorporados"
-    df["reincorporados"] = df["reincorporados"].replace("", np.nan)
+    df["reincorporados"] = df["reincorporados"].replace("", np.nan).infer_objects(copy=False)
     return df
 
 
@@ -581,7 +581,10 @@ def final_string_clean(df: pd.DataFrame) -> pd.DataFrame:
         Cleaned DataFrame.
     """
     for col in df.columns:
-        if df[col].dtype == "object":
+        if (
+            df[col].dtype == object
+            or pd.api.types.is_string_dtype(df[col])
+        ) and not pd.api.types.is_bool_dtype(df[col]):
             df[col] = df[col].astype(str).str.lower().str.strip()
     df = df.replace("nan", pd.NA)
     return df

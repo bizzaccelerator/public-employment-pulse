@@ -669,7 +669,7 @@ class TestIntegration:
             assert row["vca"].iloc[0] == "vca"   # final_string_clean lowercases
 
     def test_no_literal_nan_strings_remain(self, full_df):
-        for col in full_df.select_dtypes(include="object").columns:
+        for col in full_df.select_dtypes(include=["object", "string"]).columns:
             assert (full_df[col] == "nan").sum() == 0, \
                 f"Column '{col}' still contains literal 'nan' strings"
 
