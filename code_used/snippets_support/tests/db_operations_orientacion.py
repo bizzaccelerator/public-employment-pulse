@@ -147,7 +147,12 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
          'anio_taller' to nullable Int64.
       3. Cast date columns to datetime.
       4. Convert list-valued 'grupos_etnicos' to comma-joined string.
-      5. Replace numpy NaN with None (required for SQL NULL insertion).
+      5. Replace numpy NaN with None in object/string columns.
+         Uses a column-by-column approach because df.where(pd.notnull(df), None)
+         silently no-ops on object dtype in pandas 2.x, leaving numpy NaN in
+         place and causing SQLAlchemy type errors on insertion.
+         Numeric and datetime columns are left untouched — their nullable types
+         (Int64, datetime64) handle pd.NA / NaT correctly at the DB layer.
 
     Args:
         df: Raw parquet DataFrame from orientacion_hv.run_pipeline().
@@ -181,8 +186,10 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             lambda x: ", ".join(x) if isinstance(x, list) else x
         )
 
-    # 5. numpy NaN → None
-    df = df.where(pd.notnull(df), None)
+    # 5. numpy NaN → None in object/string columns only.
+    obj_cols = df.select_dtypes(include=["object", "string"]).columns
+    for col in obj_cols:
+        df[col] = df[col].where(df[col].notna(), other=None)
 
     return df
 
