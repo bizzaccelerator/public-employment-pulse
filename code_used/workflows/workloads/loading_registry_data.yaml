@@ -32,7 +32,7 @@ variables:
 tasks:
   - id: download_file
     type: io.kestra.plugin.gcp.gcs.Download
-    from: gs://operations-raw-data_public-employment-pulse/BD_Registro_2024_2025_acumulado.xlsx
+    from: gs://operations-raw-data_public-employment-pulse/BD_Registro_2024_2025_2026_acumulado.xlsx
 
   - id: reading_monthly_registries
     type: io.kestra.plugin.scripts.python.Commands
