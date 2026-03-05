@@ -70,7 +70,7 @@ tasks:
       - "workshop_count.txt"
   
   - id: log_completion
-    type: io.kestra.core.tasks.log.Log
+    type: io.kestra.plugin.core.log.Log
     message: "Excel files processed successfully"
 
   - id: run_data_quality_tests
@@ -83,37 +83,26 @@ tasks:
     namespaceFiles:
       enabled: true
       include:
-        - "orientacion_hv.py"        # module under test (already used by reading_monthly_registries)
-        - "conftest.py"              # shared pytest fixtures (in-memory DataFrames, no Excel needed)
-        - "test_orientacion_hv.py"   # pytest test suite
-        - "run_tests_orientacion.py" # orchestrator: runs pytest, writes output files
+        - "orientacion_hv.py"        
+        - "conftest.py"              
+        - "test_orientacion_hv.py"   
+        - "run_tests_orientacion.py" 
     beforeCommands:
-      # pytest-json-report produces the machine-readable JSON that run_tests.py
-      # parses into test_results.json and test_report.txt
       - pip install pandas numpy openpyxl pyarrow fastparquet pytest pytest-json-report --quiet
     commands:
-      - "python run_tests.py"
+      - "python run_tests_orientacion.py"
     outputFiles:
-      - "test_results.json"   # machine-readable — consumed by notify_test_results
-      - "test_report.txt"     # human-readable  — attached to notification email
+      - "test_results.json"   
+      - "test_report.txt"     
 
   - id: notify_test_results
     type: io.kestra.plugin.notifications.mail.MailSend
-    # allowFailure: true ensures this notification task always executes.
-    # Without it, a non-zero exit from run_data_quality_tests would halt
-    # the pipeline before the email fires — the team would have no alert.
-    # The overall execution is still marked FAILED by Kestra when tests fail.
     allowFailure: true
     from: "{{ kv('SENDER_EMAIL') }}"
     to: "{{ kv('RECIPIENT_EMAILS') }}"
-    subject: >-
-      {% if outputs.run_data_quality_tests.exitCode == 0 %}
-        Tests PASSED - orientacion {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}
-      {% else %}
-        Tests FAILED - orientacion {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}
-      {% endif %}
+    subject: "{% if outputs.run_data_quality_tests.exitCode == 0 %}Tests PASSED{% else %}Tests FAILED{% endif %} - registro_hv {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}"
     htmlTextContent: |
-      {% set results = outputs.run_data_quality_tests.outputFiles['test_results.json'] | json %}
+      {% set results = json(read(outputs.run_data_quality_tests.outputFiles['test_results.json'])) %}
       <h2>
         {% if results.all_passed %}
           All {{ results.total }} tests passed

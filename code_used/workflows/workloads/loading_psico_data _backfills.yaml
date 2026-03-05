@@ -59,6 +59,75 @@ tasks:
   - id: log_completion
     type: io.kestra.core.tasks.log.Log
     message: "Excel files processed successfully"
+
+  - id: run_data_quality_tests
+    type: io.kestra.plugin.scripts.python.Commands
+    docker:
+      image: python:3.11-slim
+    description: "Run pytest data quality tests for the orientacion_hv transformation logic"
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    namespaceFiles:
+      enabled: true
+      include:
+        - "orientacion_hv.py"        
+        - "conftest.py"              
+        - "test_orientacion_hv.py"   
+        - "run_tests_orientacion.py" 
+    beforeCommands:
+      - pip install pandas numpy openpyxl pyarrow fastparquet pytest pytest-json-report --quiet
+    commands:
+      - "python run_tests_orientacion.py"
+    outputFiles:
+      - "test_results.json"   
+      - "test_report.txt"     
+
+  - id: notify_test_results
+    type: io.kestra.plugin.notifications.mail.MailSend
+    allowFailure: true
+    from: "{{ kv('SENDER_EMAIL') }}"
+    to: "{{ kv('RECIPIENT_EMAILS') }}"
+    subject: "{% if outputs.run_data_quality_tests.exitCode == 0 %}Tests PASSED{% else %}Tests FAILED{% endif %} - registro_hv {{ trigger.date | date('M') }}/{{ trigger.date | date('yyyy') }}"
+    htmlTextContent: |
+      {% set results = json(read(outputs.run_data_quality_tests.outputFiles['test_results.json'])) %}
+      <h2>
+        {% if results.all_passed %}
+          All {{ results.total }} tests passed
+        {% else %}
+          {{ results.failed }} of {{ results.total }} tests failed
+        {% endif %}
+      </h2>
+      <p>
+        <strong>Pipeline run:</strong>
+        orientacion_hv &mdash; {{ trigger.date | date('M') }}/{{ trigger.date | date('yyyy') }}<br>
+        <strong>Run at:</strong> {{ results.run_at }}<br>
+        <strong>Total tests:</strong> {{ results.total }}<br>
+        <strong>Passed:</strong> {{ results.passed }}<br>
+        <strong>Failed:</strong> {{ results.failed }}
+      </p>
+      {% if not results.all_passed %}
+      <h3 style="color:#cc0000;">Failed Tests</h3>
+      <ul>
+        {% for t in results.tests %}
+          {% if not t.passed %}
+          <li>
+            <strong>{{ t.name }}</strong><br>
+            <pre style="font-size:0.85em;background:#f8f8f8;padding:6px;">{{ t.detail }}</pre>
+          </li>
+          {% endif %}
+        {% endfor %}
+      </ul>
+      {% endif %}
+      <p>The full test log is attached as <code>test_report.txt</code>.</p>
+    attachments:
+      - name: "test_report_{{ trigger.date | date('M') }}_{{ trigger.date | date('yyyy') }}.txt"
+        uri: "{{ outputs.run_data_quality_tests.outputFiles['test_report.txt'] }}"
+        contentType: text/plain
+    host: "{{ kv('SMTP_SERVER') }}"
+    port: "{{ kv('SMTP_PORT') }}"
+    username: "{{ kv('GMAIL_USERNAME') }}"
+    password: "{{ kv('GMAIL_APP_PASSWORD') }}"
+    transportStrategy: SMTP_TLS
   
   - id: drop_tables_if_exists
     type: io.kestra.plugin.jdbc.postgresql.Query
