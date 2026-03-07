@@ -68,8 +68,8 @@ tasks:
     username: "{{ kv('POSTGRES_USER') }}"
     password: "{{ kv('POSTGRES_PASSWORD') }}"
     sql: |
-      DROP TABLE IF EXISTS {{render(vars.staging_table)}};
-      DROP TABLE IF EXISTS {{render(vars.table)}};
+      DROP TABLE IF EXISTS {{render(vars.staging_table)}} CASCADE;
+      DROP TABLE IF EXISTS {{render(vars.table)}} CASCADE;
   
   - id: create_intermediation_tables
     type: io.kestra.plugin.jdbc.postgresql.Query
@@ -110,10 +110,10 @@ tasks:
           observacion_intermediacion TEXT,
           observacion_gestion TEXT,
           observacion_del_candidato TEXT,
-          mes_de_colocacion_en_plataforma VARCHAR(50),
+          mes_de_colocacion_en_plataforma VARCHAR(300),
           colocado INTEGER,
           semana_publicacion_vacante INTEGER,
-          mes_publicacion_vacante VARCHAR(50),
+          mes_publicacion_vacante VARCHAR(300),
           tipo_de_vacante VARCHAR(200),
           anio_publicacion_vacante INTEGER,
           discapacidad VARCHAR(200),
@@ -209,6 +209,28 @@ tasks:
         # Rename columns
         df = df.rename(columns=column_mapping)
         
+        # Define the exact columns expected by the staging table
+        expected_columns = [
+            'item', 'mes_registro', 'convenio', 'gestion_vacante', 'poblacion', 'no',
+            'codigo_proceso', 'nombre_de_la_empresa', 'nombre_de_la_vacante',
+            'puestos_de_trabajo_en_plataforma', 'fecha_de_publicacion_de_la_vacante',
+            'fecha_de_vencimiento_de_la_vacante', 'hojas_de_vida_remitidas',
+            'fecha_envio_hojas_de_vida_a_la_empresa', 'nombre_del_candidato',
+            'cedula', 'telefono', 'edad', 'rango_de_edad', 'nivel_educativo',
+            'formacion', 'sexo', 'barrio', 'condicion', 'gestor', 'intermediador',
+            'llamada_convocatoria_base_de_datos', 'observacion_intermediacion',
+            'observacion_gestion', 'observacion_del_candidato',
+            'mes_de_colocacion_en_plataforma', 'colocado', 'semana_publicacion_vacante',
+            'mes_publicacion_vacante', 'tipo_de_vacante', 'anio_publicacion_vacante',
+            'discapacidad', 'vca', 'vvg', 'migrante', 'etnias', 'reincorporados'
+        ]
+
+        # Drop any unexpected columns coming from the raw Excel
+        unexpected = [col for col in df.columns if col not in expected_columns]
+        if unexpected:
+            print(f"WARNING: Dropping unexpected columns from raw data: {unexpected}")
+        df = df[[col for col in expected_columns if col in df.columns]]
+
         # Convert date columns with proper format
         date_columns = ['fecha_de_publicacion_de_la_vacante', 'fecha_de_vencimiento_de_la_vacante', 'fecha_envio_hojas_de_vida_a_la_empresa']
         for col in date_columns:
@@ -377,8 +399,7 @@ tasks:
         COALESCE(etnias, '') as etnias,
         COALESCE(reincorporados, '') as reincorporados
       FROM {{render(vars.staging_table)}}
-      WHERE EXTRACT(MONTH FROM fecha_envio_hojas_de_vida_a_la_empresa) = {{ inputs.month_of_interest }}
-        AND EXTRACT(YEAR FROM fecha_envio_hojas_de_vida_a_la_empresa) = {{ inputs.year_of_interest }};
+      WHERE filename = '{{ render(vars.file) }}';
     store: true
   
   - id: convert_monthly_data_to_parquet
