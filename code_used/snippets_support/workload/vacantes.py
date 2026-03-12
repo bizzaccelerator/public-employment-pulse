@@ -1,113 +1,267 @@
-import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
+"""
+vacantes.py
+-----------
+Processes raw job postings (vacantes) from an Excel file,
+filters by a given month/year, and exports the result as a
+compressed Parquet file alongside a record-count text file.
+
+Environment variables (injected by Kestra):
+    MONTH   – integer month of interest (1-12)
+    YEAR    – integer year of interest  (e.g. 2026)
+"""
+
+from __future__ import annotations
+
+import logging
 import os
+from datetime import datetime, timedelta
 
-# INPUTS
-prev_month = int(os.getenv('MONTH'))
-prev_year = int(os.getenv('YEAR'))
+import numpy as np
+import pandas as pd
 
-jobs = pd.read_excel('job_posting', sheet_name="Vacantes")
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+log = logging.getLogger(__name__)
 
-# Typing column the names 
-jobs.columns = jobs.columns.str.lower()
-jobs.columns = jobs.columns.str.replace(" ","_")
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+SOURCE_FILE = "job_posting"
+SHEET_NAME = "Vacantes"
 
-jobs = jobs.drop('empre_reg', axis=1)
+COLUMNS_TO_DROP = ["empre_reg"]
 
-# Cleaning NaN data. Data as 'nan' are not actual "NaN":
-for column in jobs.columns:
-    jobs[column] = jobs[column].replace('nan', pd.NA)
-    jobs[column] = jobs[column].replace('', pd.NA)
+COLUMNS_TO_KEEP = [
+    "código_proceso",
+    "nombre_vacante",
+    "cargo",
+    "#_postulados",
+    "empresa",
+    "tipodocumentoempresa",
+    "numerodocumentoempresa",
+    "fecha_registro",
+    "fecha_vencimiento",
+    "estado_actual",
+    "tipo_de_vacante",
+    "puestos_de_trabajo",
+    "tipo_de_contrato",
+    "agente_aprobó",
+    "mes",
+    "año",
+    "punto_atención",
+    "país",
+]
 
-for col in jobs.columns:
-    if jobs[col].dtype == 'object':
-        jobs[col] = jobs[col].astype(str)
-        jobs[column] = [str(i).lower() for i in jobs[column]]
-        jobs[column] = [str(i).strip() for i in jobs[column]]
+DATE_COLUMNS = ["fecha_registro", "fecha_vencimiento"]
 
-jobs['fecha_registro'] = jobs['fecha_registro'].fillna("")
+# Excel's epoch anchor
+EXCEL_BASE_DATE = datetime(1899, 12, 30)
 
-# Function to handle different date formats
-def parse_dates(date_str):
-    if pd.isna(date_str) or date_str == "" or str(date_str).strip() == "":
+
+# ---------------------------------------------------------------------------
+# I/O helpers
+# ---------------------------------------------------------------------------
+def load_excel(path: str, sheet: str) -> pd.DataFrame:
+    """Read the raw Excel sheet into a DataFrame."""
+    log.info("Reading Excel file '%s', sheet '%s'", path, sheet)
+    return pd.read_excel(path, sheet_name=sheet)
+
+
+def export_parquet(df: pd.DataFrame, path: str) -> None:
+    """Persist the DataFrame as a zstd-compressed Parquet file."""
+    log.info("Exporting %d rows to '%s'", len(df), path)
+    df.to_parquet(path, compression="zstd")
+
+
+def write_record_count(count: int, path: str = "record_count.txt") -> None:
+    """Write the record count to a plain-text file for downstream tasks."""
+    with open(path, "w") as fh:
+        fh.write(str(count))
+    log.info("Record count (%d) written to '%s'", count, path)
+
+
+# ---------------------------------------------------------------------------
+# Column normalisation
+# ---------------------------------------------------------------------------
+def normalise_column_names(df: pd.DataFrame) -> pd.DataFrame:
+    """Lowercase column names and replace spaces with underscores."""
+    df.columns = df.columns.str.lower().str.replace(" ", "_", regex=False)
+    return df
+
+
+def drop_columns(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    """Drop columns that exist in *cols*, silently ignoring missing ones."""
+    existing = [c for c in cols if c in df.columns]
+    return df.drop(columns=existing)
+
+
+def select_columns(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    """Return only the subset of *cols* that are present in the DataFrame."""
+    available = [c for c in cols if c in df.columns]
+    missing = set(cols) - set(available)
+    if missing:
+        log.warning("Expected columns not found and will be skipped: %s", missing)
+    return df[available]
+
+
+# ---------------------------------------------------------------------------
+# Data cleaning
+# ---------------------------------------------------------------------------
+def clean_string_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    For every object-dtype column:
+    - Replace the literal string 'nan' and empty strings with a proper NA.
+    - Strip whitespace and lowercase via the .str accessor, which skips
+      NA cells by design so no sentinel value leaks back as a real string.
+
+    Note on NA type: on plain string-dtype Series (pandas >= 2), .replace()
+    inserts np.nan (float).  On StringDtype Series it inserts pd.NA.
+    Use pd.isna() — not `is pd.NA` — to check for missingness, as it
+    handles both correctly.
+    """
+    _SENTINEL_NULLS = {"nan", "none", "<na>", ""}
+
+    for col in df.select_dtypes(include="object").columns:
+        # Step 1 – normalise known null-like strings to NA
+        df[col] = df[col].replace({s: pd.NA for s in _SENTINEL_NULLS})
+
+        # Step 2 – strip and lowercase; NA cells are skipped automatically
+        df[col] = df[col].str.strip().str.lower()
+
+        # Step 3 – second pass catches values hidden behind whitespace
+        #           before step 1 (e.g. "  nan  " -> "nan" -> NA)
+        df[col] = df[col].replace({s: pd.NA for s in _SENTINEL_NULLS})
+
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Date parsing
+# ---------------------------------------------------------------------------
+def _parse_single_date(date_str: str | float | None) -> datetime | pd.NaT:
+    """
+    Parse a single date value that may be:
+      1. An Excel serial number (float/int stored as string, e.g. '45679').
+      2. A slash-delimited string with optional AM/PM time (DD/MM/YYYY …).
+      3. A dash-delimited string in DD-MM-YYYY format.
+
+    Returns pd.NaT for any value that cannot be parsed.
+    """
+    if pd.isna(date_str) or str(date_str).strip() in ("", "nat", "none"):
         return pd.NaT
-    
+
     date_str = str(date_str).strip()
-    
-    # Case 1: Excel serial number (pure digits or float representation)
-    # Check if it's a number (could be "45679" or "45679.0")
-    try:
-        excel_num = float(date_str)
-        # If it's a valid Excel serial number (typically between 1 and 50000+)
-        if excel_num > 0 and '/' not in date_str and '-' not in date_str:
-            # Excel's base date is December 30, 1899
-            # No adjustment needed for modern dates
-            base_date = datetime(1899, 12, 30)
-            return base_date + timedelta(days=excel_num)
-    except ValueError:
-        pass  # Not a number, continue to other formats
-    
-    # Case 2: Format with slashes and time (DD/MM/YYYY with potential time)
-    if '/' in date_str:
+
+    # --- 1. Excel serial number ---
+    if "/" not in date_str and "-" not in date_str:
         try:
-            # Remove the periods and extra spaces from "p. m." or "a. m."
-            date_str_cleaned = date_str.replace(' p. m.', ' PM').replace(' a. m.', ' AM')
-            
-            # Try parsing with time component first
-            if 'PM' in date_str_cleaned or 'AM' in date_str_cleaned:
-                return pd.to_datetime(date_str_cleaned, format="%d/%m/%Y %I:%M:%S %p")
-            
-            # Try without time component - explicitly parse DD/MM/YYYY
-            parts = date_str.split()[0].split('/')  # Get date part only
-            if len(parts) == 3:
-                day, month, year = parts
-                return pd.to_datetime(f"{year}-{month}-{day}", format="%Y-%m-%d")
+            serial = float(date_str)
+            if serial > 0:
+                return EXCEL_BASE_DATE + timedelta(days=serial)
+        except ValueError:
+            pass
+
+    # --- 2. Slash-delimited (DD/MM/YYYY [HH:MM:SS a/p. m.]) ---
+    if "/" in date_str:
+        try:
+            cleaned = (
+                date_str.replace(" p. m.", " PM")
+                        .replace(" a. m.", " AM")
+                        .replace(" p.m.", " PM")
+                        .replace(" a.m.", " AM")
+            )
+            if "PM" in cleaned or "AM" in cleaned:
+                return pd.to_datetime(cleaned, format="%d/%m/%Y %I:%M:%S %p")
+            day, month, year = cleaned.split()[0].split("/")
+            return pd.to_datetime(f"{year}-{month}-{day}", format="%Y-%m-%d")
         except (ValueError, IndexError):
             pass
-    
-    # Case 3: DD-MM-YYYY format (with dashes)
-    if '-' in date_str and len(date_str.split('-')) == 3:
+
+    # --- 3. Dash-delimited (DD-MM-YYYY) ---
+    parts = date_str.split("-")
+    if len(parts) == 3:
         try:
-            parts = date_str.split('-')
-            # Check if it looks like DD-MM-YYYY (day would be <= 31)
             if len(parts[0]) <= 2 and int(parts[0]) <= 31:
                 day, month, year = parts
                 return pd.to_datetime(f"{year}-{month}-{day}", format="%Y-%m-%d")
         except (ValueError, IndexError):
             pass
-    
-    # Case 4: Fallback - return NaT for unparseable dates
+
+    log.debug("Unable to parse date value: '%s'", date_str)
     return pd.NaT
 
-# Convert date columns
-jobs['fecha_registro'] = jobs['fecha_registro'].apply(parse_dates)
 
-# Floor the date to remove time (ensures it's still a datetime object)
-jobs['fecha_registro'] = jobs['fecha_registro'].dt.floor('D')
+def parse_date_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """Apply _parse_single_date to each column in *columns* and floor to day."""
+    for col in columns:
+        if col not in df.columns:
+            continue
+        df[col] = df[col].fillna("").apply(_parse_single_date)
+        df[col] = df[col].dt.floor("D")
+    return df
 
-# Extracting the relevant data to work with
-jobs = jobs[['código_proceso', 'nombre_vacante', 'cargo', '#_postulados', 'empresa',
-       'tipodocumentoempresa', 'numerodocumentoempresa', 'fecha_registro',
-       'fecha_vencimiento', 'estado_actual', 'tipo_de_vacante',
-       'puestos_de_trabajo', 'tipo_de_contrato', 'agente_aprobó',
-       'mes', 'año', 'punto_atención', 'país']]
 
-# The new companies for this months are
-filter = (jobs['mes'] == prev_month) & (jobs['año'] == prev_year)
+# ---------------------------------------------------------------------------
+# Filtering
+# ---------------------------------------------------------------------------
+def filter_by_period(df: pd.DataFrame, month: int, year: int) -> pd.DataFrame:
+    """Keep only rows where 'mes' == *month* and 'año' == *year*."""
+    mask = (df["mes"] == month) & (df["año"] == year)
+    filtered = df[mask].copy()
+    log.info(
+        "Filtered to month=%d / year=%d: %d → %d rows",
+        month, year, len(df), len(filtered),
+    )
+    return filtered
 
-jobs = jobs[filter]
 
-jobs['empresa'].count()
+# ---------------------------------------------------------------------------
+# Pipeline orchestrator
+# ---------------------------------------------------------------------------
+def run_pipeline(month: int, year: int) -> None:
+    """End-to-end processing: load → clean → filter → export."""
+    # 1. Load
+    df = load_excel(SOURCE_FILE, SHEET_NAME)
 
-# Exporting the data
-# jobs.to_parquet(f'jobs_2024', compression='zstd')
-jobs.to_parquet(f'vacantes_{prev_year}_{prev_month}.parquet', compression='zstd')
+    # 2. Normalise shape
+    df = normalise_column_names(df)
+    df = drop_columns(df, COLUMNS_TO_DROP)
 
-# Counting the number of valid records processed
-num_valid_records = jobs.shape[0]
-print(f"Number of valid records processed for {prev_month}/{prev_year}: {num_valid_records}")
-# Output the count
-with open('record_count.txt', 'w') as f:
-    f.write(str(num_valid_records))
+    # 3. Clean strings before anything else
+    df = clean_string_columns(df)
 
+    # 4. Parse date columns
+    df = parse_date_columns(df, DATE_COLUMNS)
+
+    # 5. Select only the columns we need
+    df = select_columns(df, COLUMNS_TO_KEEP)
+
+    # 6. Filter to the requested period
+    df = filter_by_period(df, month, year)
+
+    # 7. Export
+    output_parquet = f"vacantes_{year}_{month}.parquet"
+    export_parquet(df, output_parquet)
+
+    record_count = len(df)
+    write_record_count(record_count)
+    log.info(
+        "Pipeline complete. %d records written for %d/%d.",
+        record_count, month, year,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    month = int(os.getenv("MONTH", "1"))
+    year = int(os.getenv("YEAR", "2026"))
+
+    log.info("Starting vacantes pipeline for month=%d / year=%d", month, year)
+    run_pipeline(month, year)

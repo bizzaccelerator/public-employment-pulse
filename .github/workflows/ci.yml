@@ -20,6 +20,11 @@ on:
       - "code_used/snippets_support/tests/test_orientacion_hv.py"
       - "code_used/snippets_support/tests/test_integration_orientacion.py"
       - "fixtures/fixture_data_orientacion.py"
+      # vacantes module
+      - "code_used/snippets_support/workload/vacantes.py"
+      - "code_used/snippets_support/tests/db_operations_vacantes.py"
+      - "code_used/snippets_support/tests/test_vacantes.py"
+      - "code_used/snippets_support/tests/test_integration_vacantes.py"
       # shared
       - ".github/workflows/ci.yml"
       - "requirements-test.txt"
@@ -39,6 +44,11 @@ on:
       - "code_used/snippets_support/tests/test_orientacion_hv.py"
       - "code_used/snippets_support/tests/test_integration_orientacion.py"
       - "fixtures/fixture_data_orientacion.py"
+      # vacantes module
+      - "code_used/snippets_support/workload/vacantes.py"
+      - "code_used/snippets_support/tests/db_operations_vacantes.py"
+      - "code_used/snippets_support/tests/test_vacantes.py"
+      - "code_used/snippets_support/tests/test_integration_vacantes.py"
       # shared
       - ".github/workflows/ci.yml"
       - "requirements-test.txt"
@@ -268,8 +278,116 @@ jobs:
 
 
   # ---------------------------------------------------------------------------
-  # JOB 5: Notify on failure (main branch only)
-  # Fires when ANY of the four test jobs fails.
+  # JOB 5: vacantes — Unit tests
+  # ---------------------------------------------------------------------------
+  unit-tests-vacantes:
+    name: "Unit Tests · vacantes"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: requirements-test.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-test.txt
+
+      - name: Run unit tests
+        run: |
+          pytest code_used/snippets_support/tests/test_vacantes.py \
+            --tb=short \
+            -v \
+            --json-report \
+            --json-report-file=unit-test-results-vacantes.json
+
+      - name: Upload unit test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results-vacantes
+          path: unit-test-results-vacantes.json
+          retention-days: 30
+
+
+  # ---------------------------------------------------------------------------
+  # JOB 6: vacantes — Integration tests
+  # Runs only after unit tests pass (saves minutes on obvious breakage).
+  # ---------------------------------------------------------------------------
+  integration-tests-vacantes:
+    name: "Integration Tests · vacantes"
+    runs-on: ubuntu-latest
+    needs: unit-tests-vacantes
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER:     postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB:       postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
+
+    env:
+      DB_HOST:     localhost
+      DB_PORT:     5432
+      DB_NAME:     postgres
+      DB_USER:     postgres
+      DB_PASSWORD: postgres
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: requirements-test.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-test.txt
+
+      - name: Wait for PostgreSQL
+        run: |
+          for i in {1..10}; do
+            pg_isready -h localhost -p 5432 -U postgres && break
+            echo "Waiting for postgres... attempt $i"
+            sleep 2
+          done
+
+      - name: Run integration tests
+        run: |
+          pytest code_used/snippets_support/tests/test_integration_vacantes.py \
+            --tb=short \
+            -v \
+            --json-report \
+            --json-report-file=integration-test-results-vacantes.json
+
+      - name: Upload integration test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results-vacantes
+          path: integration-test-results-vacantes.json
+          retention-days: 30
+
+
+  # ---------------------------------------------------------------------------
+  # JOB 7: Notify on failure (main branch only)
+  # Fires when ANY of the six test jobs fails.
   # ---------------------------------------------------------------------------
   notify-on-failure:
     name: Notify on Failure
@@ -279,6 +397,8 @@ jobs:
       - integration-tests-registro
       - unit-tests-orientacion
       - integration-tests-orientacion
+      - unit-tests-vacantes
+      - integration-tests-vacantes
     if: failure() && github.ref == 'refs/heads/main'
 
     steps:
@@ -305,7 +425,9 @@ jobs:
             Check the uploaded JSON artifacts for the full test report.
 
             Jobs in this run:
-              unit-tests-registro          → ${{ needs.unit-tests-registro.result }}
-              integration-tests-registro   → ${{ needs.integration-tests-registro.result }}
-              unit-tests-orientacion       → ${{ needs.unit-tests-orientacion.result }}
+              unit-tests-registro           → ${{ needs.unit-tests-registro.result }}
+              integration-tests-registro    → ${{ needs.integration-tests-registro.result }}
+              unit-tests-orientacion        → ${{ needs.unit-tests-orientacion.result }}
               integration-tests-orientacion → ${{ needs.integration-tests-orientacion.result }}
+              unit-tests-vacantes           → ${{ needs.unit-tests-vacantes.result }}
+              integration-tests-vacantes    → ${{ needs.integration-tests-vacantes.result }}
