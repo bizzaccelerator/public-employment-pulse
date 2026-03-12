@@ -115,18 +115,28 @@ def select_columns(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
 def clean_string_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     For every object-dtype column:
-    - Replace the literal string 'nan' and empty strings with pd.NA.
-    - Cast to str, strip whitespace, and lowercase.
+    - Replace the literal string 'nan' and empty strings with a proper NA.
+    - Strip whitespace and lowercase via the .str accessor, which skips
+      NA cells by design so no sentinel value leaks back as a real string.
+
+    Note on NA type: on plain string-dtype Series (pandas >= 2), .replace()
+    inserts np.nan (float).  On StringDtype Series it inserts pd.NA.
+    Use pd.isna() — not `is pd.NA` — to check for missingness, as it
+    handles both correctly.
     """
+    _SENTINEL_NULLS = {"nan", "none", "<na>", ""}
+
     for col in df.select_dtypes(include="object").columns:
-        df[col] = df[col].replace({"nan": pd.NA, "": pd.NA})
-        df[col] = (
-            df[col]
-            .astype(str)
-            .str.strip()
-            .str.lower()
-            .replace("nan", pd.NA)   # catch any 'nan' introduced by .astype(str)
-        )
+        # Step 1 – normalise known null-like strings to NA
+        df[col] = df[col].replace({s: pd.NA for s in _SENTINEL_NULLS})
+
+        # Step 2 – strip and lowercase; NA cells are skipped automatically
+        df[col] = df[col].str.strip().str.lower()
+
+        # Step 3 – second pass catches values hidden behind whitespace
+        #           before step 1 (e.g. "  nan  " -> "nan" -> NA)
+        df[col] = df[col].replace({s: pd.NA for s in _SENTINEL_NULLS})
+
     return df
 
 

@@ -30,15 +30,98 @@ variables:
   month_padded: "{{ '%02d' | format(inputs.month_of_interest) }}"
 
 tasks:
+  # ─────────────────────────────────────────────────────────────────────────
+  # STAGE 1 – Download source file
+  # ─────────────────────────────────────────────────────────────────────────
   - id: download_registries_file
     type: io.kestra.plugin.gcp.gcs.Download
     from: gs://operations-raw-data_public-employment-pulse/Vacantes_publicadas_2024-2025-2026.xlsx
 
+  # ─────────────────────────────────────────────────────────────────────────
+  # STAGE 2 – Unit tests (run before any data transformation)
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: run_unit_tests
+    type: io.kestra.plugin.scripts.python.Commands
+    docker:
+      image: python:3.11-slim
+    description: "Run pytest unit tests for vacantes.py transformation logic"
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    namespaceFiles:
+      enabled: true
+      include:
+        - "vacantes.py"
+        - "test_vacantes.py"
+        - "run_tests_vacantes.py"
+    beforeCommands:
+      - pip install pandas numpy openpyxl pyarrow fastparquet pytest pytest-json-report --quiet
+    commands:
+      - "python run_tests_vacantes.py"
+    outputFiles:
+      - "test_results.json"
+      - "test_report.txt"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # STAGE 3 – Notify unit-test outcome (allowFailure so pipeline continues)
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: notify_unit_test_results
+    type: io.kestra.plugin.notifications.mail.MailSend
+    allowFailure: true
+    from: "{{ kv('SENDER_EMAIL') }}"
+    to: "{{ kv('RECIPIENT_EMAILS') }}"
+    subject: "{% if outputs.run_unit_tests.exitCode == 0 %}Unit Tests PASSED{% else %}Unit Tests FAILED{% endif %} - vacantes {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}"
+    htmlTextContent: |
+      {% set results = json(read(outputs.run_unit_tests.outputFiles['test_results.json'])) %}
+
+      <h2>
+        {% if results.all_passed %}
+          ✅ All {{ results.total }} unit tests passed
+        {% else %}
+          ❌ {{ results.failed }} of {{ results.total }} unit tests failed
+        {% endif %}
+      </h2>
+
+      <p>
+        <strong>Pipeline run:</strong> vacantes &mdash; {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}<br>
+        <strong>Run at:</strong> {{ results.run_at }}<br>
+        <strong>Total tests:</strong> {{ results.total }}<br>
+        <strong>Passed:</strong> {{ results.passed }}<br>
+        <strong>Failed:</strong> {{ results.failed }}
+      </p>
+
+      {% if not results.all_passed %}
+      <h3 style="color:#cc0000;">Failed Tests</h3>
+      <ul>
+        {% for t in results.tests %}
+          {% if not t.passed %}
+          <li>
+            <strong>{{ t.name }}</strong><br>
+            <pre style="font-size:0.85em;background:#f8f8f8;padding:6px;">{{ t.detail }}</pre>
+          </li>
+          {% endif %}
+        {% endfor %}
+      </ul>
+      {% endif %}
+
+      <p>The full test log is attached as <code>test_report.txt</code>.</p>
+    attachments:
+      - name: "unit_test_report_{{ inputs.month_of_interest }}_{{ inputs.year_of_interest }}.txt"
+        uri: "{{ outputs.run_unit_tests.outputFiles['test_report.txt'] }}"
+        contentType: text/plain
+    host: "{{ kv('SMTP_SERVER') }}"
+    port: "{{ kv('SMTP_PORT') }}"
+    username: "{{ kv('GMAIL_USERNAME') }}"
+    password: "{{ kv('GMAIL_APP_PASSWORD') }}"
+    transportStrategy: SMTP_TLS
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # STAGE 4 – Transform: extract and filter the monthly data
+  # ─────────────────────────────────────────────────────────────────────────
   - id: reading_monthly_registries
     type: io.kestra.plugin.scripts.python.Commands
     docker:
       image: python:3.11-slim
-    description: "identifying the new companies registered in {{ vars.month_name }}"
+    description: "identifying the new vacantes registered in {{ vars.month_name }}"
     taskRunner:
       type: io.kestra.plugin.core.runner.Process
     namespaceFiles:
@@ -57,11 +140,14 @@ tasks:
     outputFiles:
       - "*.parquet"
       - "record_count.txt"
-  
+
   - id: log_completion
     type: io.kestra.core.tasks.log.Log
-    message: "Excel files processed successfully"
-  
+    message: "Excel file processed successfully"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # STAGE 5 – Database: drop, create, load staging
+  # ─────────────────────────────────────────────────────────────────────────
   - id: drop_tables_if_exists
     type: io.kestra.plugin.jdbc.postgresql.Query
     url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
@@ -77,7 +163,6 @@ tasks:
     username: "{{ kv('POSTGRES_USER') }}"
     password: "{{ kv('POSTGRES_PASSWORD') }}"
     sql: |
-      -- Create main table if not exists
       CREATE TABLE IF NOT EXISTS {{render(vars.table)}} (
           codigo_proceso VARCHAR(255) PRIMARY KEY, 
           nombre_vacante VARCHAR(255), 
@@ -99,8 +184,7 @@ tasks:
           anio INTEGER,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
-      
-      -- Create staging table
+
       CREATE TABLE IF NOT EXISTS {{render(vars.staging_table)}} (
           LIKE {{render(vars.table)}} INCLUDING ALL
       );
@@ -125,16 +209,13 @@ tasks:
         from sqlalchemy import create_engine
         import os
         
-        # Connection
         connection_string = f"postgresql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT', '5432')}/{os.getenv('DB_NAME')}"
         engine = create_engine(connection_string)
         
-        # Read parquet
         df = pd.read_parquet('data_file')
         
         print(f"Original columns: {list(df.columns)}")
         
-        # Clean column names - map from actual parquet columns to database columns
         column_mapping = {
             'código_proceso': 'codigo_proceso', 
             'nombre_vacante': 'nombre_vacante', 
@@ -157,36 +238,28 @@ tasks:
             'created_at': 'created_at'
         }
         
-        # Rename columns
         df = df.rename(columns=column_mapping)
         
-        # Convert date columns with proper format
-        date_columns = ['fecha_registro','fecha_vencimiento', 'created_at']
+        date_columns = ['fecha_registro', 'fecha_vencimiento', 'created_at']
         for col in date_columns:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], format='mixed', dayfirst=True, errors='coerce')
         
-        # Handle numeric columns
         numeric_columns = ['n_postulados', 'numerodocumentoempresa', 'puestos_de_trabajo', 'mes', 'anio']
         for col in numeric_columns:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
         
-        # CRITICAL: Convert any remaining object/array columns to strings
         for col in df.columns:
             if df[col].dtype == 'object':
-                # Check if column contains arrays/lists
                 if df[col].apply(lambda x: isinstance(x, (list, np.ndarray))).any():
                     df[col] = df[col].apply(lambda x: str(x) if isinstance(x, (list, np.ndarray)) else x)
         
-        # Replace numpy NaN with None for proper NULL insertion
         df = df.replace({np.nan: None})
         
         print(f"Loaded {len(df)} rows from parquet")
         print(f"Mapped columns: {list(df.columns)}")
-        print(f"Data types: {df.dtypes.to_dict()}")
         
-        # Load data into staging table
         df.to_sql(
             'vacantes_staging',
             engine,
@@ -198,6 +271,9 @@ tasks:
         
         print(f"Successfully loaded {len(df)} rows to staging table")
 
+  # ─────────────────────────────────────────────────────────────────────────
+  # STAGE 6 – Enrich staging: unique ID + filename
+  # ─────────────────────────────────────────────────────────────────────────
   - id: alter_jobs_tables_add_columns
     type: io.kestra.plugin.jdbc.postgresql.Query
     url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
@@ -232,7 +308,10 @@ tasks:
   - id: log_staging_complete
     type: io.kestra.core.tasks.log.Log
     message: "Data loaded to staging table successfully"
-  
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # STAGE 7 – Data quality: identify and report incomplete records
+  # ─────────────────────────────────────────────────────────────────────────
   - id: identify_jobs_incomplete_data
     type: io.kestra.plugin.jdbc.postgresql.Query
     url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
@@ -243,9 +322,9 @@ tasks:
         unique_row_id, 
         numerodocumentoempresa,
         CASE 
+          WHEN agente_aprobo IS NULL AND puestos_de_trabajo IS NULL THEN 'agente_aprobo y puestos_de_trabajo'
           WHEN agente_aprobo IS NULL THEN 'agente_aprobo'
           WHEN puestos_de_trabajo IS NULL THEN 'puestos_de_trabajo'
-          WHEN agente_aprobo IS NULL AND puestos_de_trabajo IS NULL THEN 'agente_aprobo y puestos_de_trabajo'
         END AS missing_field
       FROM vacantes_staging
       WHERE agente_aprobo IS NULL OR puestos_de_trabajo IS NULL;
@@ -261,9 +340,9 @@ tasks:
     to: "{{ kv('RECIPIENT_EMAILS') }}"
     subject: "Incomplete Data Report - {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}"
     htmlTextContent: |
-      <h2>Incomplete Job posting Data Report</h2>
+      <h2>Incomplete Job Posting Data Report</h2>
       <p>Please find attached the incomplete data report for <strong>{{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}</strong>.</p>
-      <p><strong>Total records processed this month is:</strong> {{ read(outputs.reading_monthly_registries.outputFiles['record_count.txt']) }}</p>
+      <p><strong>Total records processed this month:</strong> {{ read(outputs.reading_monthly_registries.outputFiles['record_count.txt']) }}</p>
       <p><strong>Total records with missing fields:</strong> {{ outputs.identify_jobs_incomplete_data.size }}</p>
       <p>Please review and take appropriate action.</p>
     attachments:
@@ -276,7 +355,9 @@ tasks:
     password: "{{ kv('GMAIL_APP_PASSWORD') }}"
     transportStrategy: SMTP_TLS
 
-  # CORRECTED TASK - Query with proper data types
+  # ─────────────────────────────────────────────────────────────────────────
+  # STAGE 8 – Export to GCS
+  # ─────────────────────────────────────────────────────────────────────────
   - id: query_monthly_data_to_upload
     type: io.kestra.plugin.jdbc.postgresql.Query
     url: jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
