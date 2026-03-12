@@ -3,8 +3,22 @@ test_orientacion_hv.py
 
 Unit tests for orientacion_hv.py.
 
-All fixtures are defined inline — no conftest.py is required.
-The classify_df factory fixture mirrors the pattern used in test_registro_hv.py.
+Covers every public function in the module, using only the API that actually
+exists in the current orientacion_hv.py.  Key differences from the previous
+test file that this replaces:
+
+  - merge_all()                 → does not exist; tests now cover enrich_events()
+  - filter_orientados_by_month()→ does not exist; replaced by filter_orientacion_by_month()
+  - filter_talleres_by_month()  → does not exist; replaced by filter_taller_by_month()
+  - filter_export()             → does not exist; replaced by filter_by_month()
+  - clean_orientados() does NOT produce mes_orientado / año_orientado — those
+    are built by build_orientacion_events().
+  - clean_talleres() does NOT groupby; every raw row stays as its own event row.
+  - classify_vca() assigns "VCA" (uppercase); after final_string_clean → "vca".
+  - classify_migrants() assigns "Migrante o Retornado"; after final_string_clean
+    → "migrante o retornado".
+  - build_taller_events() renames fechaejecucion_taller → fechaejecucion_orientacion
+    (unified column name) and assigns tipo_evento = 'taller'.
 
 Run with:
     pytest test_orientacion_hv.py -v
@@ -19,7 +33,9 @@ from code_used.snippets_support.workload.orientacion_hv import (
     clean_talleres,
     clean_registrados,
     clean_psicologas,
-    merge_all,
+    build_orientacion_events,
+    build_taller_events,
+    enrich_events,
     derive_age_range,
     classify_ethnic_groups,
     classify_vca,
@@ -29,9 +45,9 @@ from code_used.snippets_support.workload.orientacion_hv import (
     classify_reintegrated,
     run_all_classifications,
     final_string_clean,
-    filter_orientados_by_month,
-    filter_talleres_by_month,
-    filter_export,
+    filter_by_month,
+    filter_orientacion_by_month,
+    filter_taller_by_month,
 )
 
 
@@ -42,12 +58,13 @@ from code_used.snippets_support.workload.orientacion_hv import (
 @pytest.fixture
 def classify_df():
     """
-    Factory fixture: returns a callable that builds a one-row DataFrame
-    for classification tests.
+    Factory fixture: returns a callable that builds a minimal one-row
+    DataFrame suitable for every classification function.
 
-    Usage inside a test:
-        def test_something(classify_df):
-            df = classify_df(cond="migrante")
+        df = classify_df(cond="migrante venezolano", tdoc="cc")
+
+    All classifiers require at minimum:
+        condiciones_especiales, programa_de_gobierno, tipodocumento
     """
     def _make(cond="", prog="", tdoc="cc"):
         return pd.DataFrame({
@@ -61,139 +78,142 @@ def classify_df():
 @pytest.fixture
 def raw_orientados():
     """
-    Two-row orientados DataFrame matching the shape returned by
-    load_orientados().  Row 0 is complete; row 1 is partially
-    incomplete to exercise edge-cases.
+    Minimal raw orientados DataFrame as it arrives from load_orientados()
+    (column names already lowercase, no date parsing yet).
+
+    Row 0 — complete record, March 2025.
+    Row 1 — partial record (NaT fechaevaluacion), March 2025.
     """
     return pd.DataFrame({
-        "numerodocumento":       ["1000001", "1000002"],
-        "fechaagendamiento":     ["2025-03-01", "2025-03-05"],
-        "fechaejecucion":        ["2025-03-02", "2025-03-06"],
-        "fechaevaluacion":       ["2025-03-03", pd.NaT],
-        "tipodocumento":         ["cc", "ce"],
-        "correoelectronico":     ["a@test.com", "b@test.com"],
-        "primernombre":          ["Ana", "Luis"],
-        "segundonombre":         [None, None],
-        "primerapellido":        ["Gomez", "Reyes"],
-        "segundoapellido":       ["Rios", None],
-        "sexo":                  ["F", "M"],
-        "ciudad":                ["Bogota", "Medellin"],
-        "departamento":          ["Cundinamarca", "Antioquia"],
-        "area":                  ["urbano", "rural"],
-        "tipo":                  ["orientacion", "orientacion"],
-        "subtipo":               ["individual", "grupal"],
-        "nombreportafolio":      ["portafolio_a", None],
-        "nombreconvocatoria":    ["conv_1", None],
-        "aprobacion":            ["si", "no"],
-        "porcentajeasistencia":  [100, 80],
-        "prestadornombre":       ["prestador_a", "prestador_b"],
-        "institucionnombre":     ["inst_a", "inst_b"],
-        "instituciondireccion":  ["calle 1", "calle 2"],
-        "institucionmunicipio":  ["bog", "med"],
+        "numerodocumento":         ["1000001", "1000002"],
+        "fechaagendamiento":       ["2025-03-01", "2025-03-05"],
+        "fechaejecucion":          ["2025-03-02", "2025-03-06"],
+        "fechaevaluacion":         ["2025-03-03", pd.NaT],
+        "usuarionombre":           ["Orientadora1", "Orientadora2"],
+        "tipodocumento":           ["cc", "ce"],
+        "correoelectronico":       ["a@test.com", "b@test.com"],
+        "primernombre":            ["Ana", "Luis"],
+        "segundonombre":           [None, None],
+        "primerapellido":          ["Gomez", "Reyes"],
+        "segundoapellido":         ["Rios", None],
+        "sexo":                    ["F", "M"],
+        "ciudad":                  ["Bogota", "Medellin"],
+        "departamento":            ["Cundinamarca", "Antioquia"],
+        "area":                    ["urbano", "rural"],
+        "tipo":                    ["orientacion", "orientacion"],
+        "subtipo":                 ["individual", "grupal"],
+        "nombreportafolio":        ["portafolio_a", None],
+        "nombreconvocatoria":      ["conv_1", None],
+        "aprobacion":              ["si", "no"],
+        "porcentajeasistencia":    [100.0, 80.0],
+        "prestadornombre":         ["prestador_a", "prestador_b"],
+        "institucionnombre":       ["inst_a", "inst_b"],
+        "instituciondireccion":    ["calle 1", "calle 2"],
+        "institucionmunicipio":    ["bog", "med"],
         "instituciondepartamento": ["cund", "ant"],
-        "programagobiernosino":  ["si", "no"],
-        "programagobierno":      ["victimas del conflicto armado", None],
+        "programagobiernosino":    ["si", "no"],
+        "programagobierno":        ["victimas del conflicto armado", None],
         "alianzasentidadesexternas": [None, None],
-        "usuarionombre":         ["Orientadora1", "Orientadora2"],
-        "agencianombre":         ["agencia_a", "agencia_b"],
-        "numerotelefono":        ["3001234567", None],
-        "indicador":             ["I1", "I1"],
-        "tipodireccionamiento":  ["dir_a", "dir_b"],
+        "agencianombre":           ["agencia_a", "agencia_b"],
+        "numerotelefono":          ["3001234567", None],
+        "indicador":               ["I1", "I1"],
+        "tipodireccionamiento":    ["dir_a", "dir_b"],
     })
 
 
 @pytest.fixture
 def raw_talleres():
     """
-    Two-row talleres DataFrame where numerodocumento 1000001 appears
-    twice to test the groupby aggregation in clean_talleres().
+    Raw talleres DataFrame as it arrives from load_talleres().
+    Two rows — both for the same person (1000001) in March 2025.
+    clean_talleres() does NOT aggregate; both rows are preserved.
     """
     return pd.DataFrame({
-        "numerodocumento":       ["1000001", "1000001"],
-        "fechaagendamiento":     ["2025-03-10", "2025-03-15"],
-        "fechaejecucion":        ["2025-03-11", "2025-03-16"],
-        "fechaevaluacion":       ["2025-03-12", pd.NaT],
-        "indicador":             ["I2", "I2"],
-        "tipodireccionamiento":  ["taller", "taller"],
-        "tipodocumento":         ["cc", "cc"],
-        "correoelectronico":     ["a@test.com", "a@test.com"],
-        "primernombre":          ["Ana", "Ana"],
-        "segundonombre":         [None, None],
-        "primerapellido":        ["Gomez", "Gomez"],
-        "segundoapellido":       ["Rios", "Rios"],
-        "sexo":                  ["f", "f"],
-        "ciudad":                ["bogota", "bogota"],
-        "departamento":          ["cundinamarca", "cundinamarca"],
-        "area":                  ["urbano", "urbano"],
-        "tipo":                  ["taller", "taller"],
-        "subtipo":               ["grupal", "grupal"],
-        "nombreportafolio":      ["port_b", "port_b"],
-        "nombreconvocatoria":    ["conv_2", "conv_2"],
-        "aprobacion":            ["si", "si"],
-        "porcentajeasistencia":  [90, 90],
-        "prestadornombre":       ["prestador_a", "prestador_a"],
-        "institucionnombre":     ["inst_a", "inst_a"],
-        "instituciondireccion":  ["calle 1", "calle 1"],
-        "institucionmunicipio":  ["bog", "bog"],
+        "numerodocumento":         ["1000001", "1000001"],
+        "fechaagendamiento":       ["2025-03-10", "2025-03-15"],
+        "fechaejecucion":          ["2025-03-11", "2025-03-16"],
+        "fechaevaluacion":         ["2025-03-12", pd.NaT],
+        "usuarionombre":           ["Tallerista1", "Tallerista1"],
+        "indicador":               ["I2", "I2"],
+        "tipodireccionamiento":    ["taller", "taller"],
+        "tipodocumento":           ["cc", "cc"],
+        "correoelectronico":       ["a@test.com", "a@test.com"],
+        "primernombre":            ["Ana", "Ana"],
+        "segundonombre":           [None, None],
+        "primerapellido":          ["Gomez", "Gomez"],
+        "segundoapellido":         ["Rios", "Rios"],
+        "sexo":                    ["f", "f"],
+        "ciudad":                  ["bogota", "bogota"],
+        "departamento":            ["cundinamarca", "cundinamarca"],
+        "area":                    ["urbano", "urbano"],
+        "tipo":                    ["taller", "taller"],
+        "subtipo":                 ["grupal", "grupal"],
+        "nombreportafolio":        ["port_b", "port_b"],
+        "nombreconvocatoria":      ["conv_2", "conv_2"],
+        "aprobacion":              ["si", "si"],
+        "porcentajeasistencia":    [90.0, 90.0],
+        "prestadornombre":         ["prestador_a", "prestador_a"],
+        "institucionnombre":       ["inst_a", "inst_a"],
+        "instituciondireccion":    ["calle 1", "calle 1"],
+        "institucionmunicipio":    ["bog", "bog"],
         "instituciondepartamento": ["cund", "cund"],
-        "programagobiernosino":  ["si", "si"],
-        "programagobierno":      ["jovenes en accion", "victimas del conflicto armado"],
+        "programagobiernosino":    ["si", "si"],
+        "programagobierno":        ["jovenes en accion", "jovenes en accion"],
         "alianzasentidadesexternas": [None, None],
-        "usuarionombre":         ["Tallerista1", "Tallerista1"],
-        "agencianombre":         ["agencia_a", "agencia_a"],
-        "numerotelefono":        ["3001234567", "3001234567"],
+        "agencianombre":           ["agencia_a", "agencia_a"],
+        "numerotelefono":          ["3001234567", "3001234567"],
     })
 
 
 @pytest.fixture
 def raw_registrados():
     """
-    Minimal registrados DataFrame using the original Excel column names
-    that arrive before clean_registrados() processes them.
+    Minimal registrados DataFrame with the original Excel column names
+    (before clean_registrados normalises them).
     """
     return pd.DataFrame({
-        "Número Documento":   ["1000001", "1000003"],
-        "No. ":               [1, 2],
+        "Número Documento":               ["1000001", "1000003"],
+        "No. ":                           [1, 2],
         "Programa / Aliado\n(Si aplica)": [None, None],
-        "Barrio donde vive":  ["barrio_x", "barrio_y"],
-        "Tipo Documento":     ["CC", "CC"],
-        "TIPO_REGISTRO":      ["Registro_nuevo", "Registro_nuevo"],
-        "Nombres":            ["Ana", "Pedro"],
-        "Apellidos":          ["Gomez Rios", "Perez"],
-        "Celular":            ["3001234567", "3009876543"],
-        "Teléfono":           [None, None],
-        "Canal de Registro":  ["Agencia", "Agencia"],
-        "Edad":               [35, 62],
-        "Rango_Edad":         ["29-39", "> 60"],
-        "Género":             ["F", "M"],
-        "Nivel de Estudio":   ["Técnico", "Primaria"],
-        "Título Homologado":  [None, None],
-        "Ciudad de Residencia": ["Bogota", "Bogota"],
-        "Email":              ["a@test.com", "p@test.com"],
-        "Fecha Registro":     ["2025-01-10", "2025-02-15"],
-        "Programa de Gobierno": ["victimas del conflicto armado", None],
-        "Condiciones Especiales": ["discapacidad física", "adulto mayor"],
-        "Detalle Discapacidades": ["fisica", None],
-        "Situación Laboral":  ["desempleado", "pensionado"],
-        "Agente Registra":    ["agente1", "agente2"],
-        "Fecha Actualización": [None, None],
-        "% Hoja Vida":        [80, 60],
-        "Prestador Anterior": [None, None],
-        "Fecha Cambio Prestador": [None, None],
-        "Vereda/Localidad/Centro Poblado": [None, None],
-        "Pertenece A":        [None, None],
-        "SISE_OFFLINE":       [None, None],
-        "Mes":                [1, 2],
-        "Año":                [2025, 2025],
-        "Punto Atención":     ["punto_1", "punto_1"],
+        "Barrio donde vive":              ["barrio_x", "barrio_y"],
+        "Tipo Documento":                 ["CC", "CC"],
+        "TIPO_REGISTRO":                  ["Registro_nuevo", "Registro_nuevo"],
+        "Nombres":                        ["Ana", "Pedro"],
+        "Apellidos":                      ["Gomez Rios", "Perez"],
+        "Celular":                        ["3001234567", "3009876543"],
+        "Teléfono":                       [None, None],
+        "Canal de Registro":              ["Agencia", "Agencia"],
+        "Edad":                           [35, 62],
+        "Rango_Edad":                     ["29-39", "> 60"],
+        "Género":                         ["F", "M"],
+        "Nivel de Estudio":               ["Técnico", "Primaria"],
+        "Título Homologado":              [None, None],
+        "Ciudad de Residencia":           ["Bogota", "Bogota"],
+        "Email":                          ["a@test.com", "p@test.com"],
+        "Fecha Registro":                 ["2025-01-10", "2025-02-15"],
+        "Programa de Gobierno":           ["victimas del conflicto armado", None],
+        "Condiciones Especiales":         ["discapacidad física", "adulto mayor"],
+        "Detalle Discapacidades":         ["fisica", None],
+        "Situación Laboral":              ["desempleado", "pensionado"],
+        "Agente Registra":                ["agente1", "agente2"],
+        "Fecha Actualización":            [None, None],
+        "% Hoja Vida":                    [80, 60],
+        "Prestador Anterior":             [None, None],
+        "Fecha Cambio Prestador":         [None, None],
+        "Vereda/Localidad/Centro Poblado":[None, None],
+        "Pertenece A":                    [None, None],
+        "SISE_OFFLINE":                   [None, None],
+        "Mes":                            [1, 2],
+        "Año":                            [2025, 2025],
+        "Punto Atención":                 ["punto_1", "punto_1"],
     })
 
 
 @pytest.fixture
 def raw_psicologas():
     """
-    Minimal psicologas DataFrame with uppercase column names as they
-    arrive from Excel before clean_psicologas() processes them.
+    Minimal psicologas DataFrame with the original Excel column names
+    (uppercase) as they arrive before clean_psicologas() processes them.
     """
     return pd.DataFrame({
         "NUMERO.1":          ["1000001", "1000004"],
@@ -208,15 +228,15 @@ def raw_psicologas():
         "RANGO":             ["29-39", "40-49"],
         "TELEFONO":          ["3001234567", "3007654321"],
         "BARRIO":            ["barrio_x", "barrio_z"],
-        "NIVEL DE FORMACIÓN": ["Técnico", "Bachiller"],
+        "NIVEL DE FORMACIÓN":["Técnico", "Bachiller"],
         "FORMACIÓN":         ["contabilidad", None],
-        "EXPERIENCIA LABORAL": ["3 años", None],
+        "EXPERIENCIA LABORAL":["3 años", None],
         "POBLACIÓN":         ["VCA, discapacidad física", "migrante"],
-        "CORREO ELECTRONICO": ["a@test.com", "m@test.com"],
+        "CORREO ELECTRONICO":["a@test.com", "m@test.com"],
         "TALLER FIS":        [None, None],
         "OBSERVACIONES":     [None, None],
-        "INTÉRES CURSO FORMACIÓN": ["si", "no"],
-        "VALIDACIÓN DE BACHILLERATO (SI / NO)": ["no", "si"],
+        "INTÉRES CURSO FORMACIÓN":             ["si", "no"],
+        "VALIDACIÓN DE BACHILLERATO (SI / NO)":["no", "si"],
         "A TENER EN CUENTA": [None, None],
     })
 
@@ -226,6 +246,27 @@ def raw_psicologas():
 # ===========================================================================
 
 class TestCleanOrientados:
+    """
+    clean_orientados():
+      - Parses fechaagendamiento / fechaejecucion / fechaevaluacion to datetime.
+      - Renames them with _orientacion suffix.
+      - Renames usuarionombre → orientador.
+      - Lowercases string cell values.
+      - Does NOT groupby; preserves one row per input row.
+      - Does NOT produce mes_evento / anio_evento (those come from
+        build_orientacion_events).
+    """
+
+    def test_date_columns_renamed_with_suffix(self, raw_orientados):
+        result = clean_orientados(raw_orientados.copy())
+        assert "fechaagendamiento_orientacion" in result.columns
+        assert "fechaejecucion_orientacion"    in result.columns
+        assert "fechaevaluacion_orientacion"   in result.columns
+
+    def test_original_date_column_names_removed(self, raw_orientados):
+        result = clean_orientados(raw_orientados.copy())
+        for old in ("fechaagendamiento", "fechaejecucion", "fechaevaluacion"):
+            assert old not in result.columns
 
     def test_date_columns_are_datetime(self, raw_orientados):
         result = clean_orientados(raw_orientados.copy())
@@ -237,56 +278,84 @@ class TestCleanOrientados:
 
     def test_usuarionombre_renamed_to_orientador(self, raw_orientados):
         result = clean_orientados(raw_orientados.copy())
-        assert "orientador" in result.columns
+        assert "orientador"    in result.columns
         assert "usuarionombre" not in result.columns
-
-    def test_mes_orientado_derived_correctly(self, raw_orientados):
-        result = clean_orientados(raw_orientados.copy())
-        assert result["mes_orientado"].iloc[0] == 3
-
-    def test_año_orientado_derived_correctly(self, raw_orientados):
-        result = clean_orientados(raw_orientados.copy())
-        assert result["año_orientado"].iloc[0] == 2025
 
     def test_string_values_lowercased(self, raw_orientados):
         result = clean_orientados(raw_orientados.copy())
+        # "F" → "f", "Bogota" → "bogota"
         assert result["sexo"].iloc[0] == "f"
-
-    def test_mes_orientado_is_nullable_int(self, raw_orientados):
-        result = clean_orientados(raw_orientados.copy())
-        assert result["mes_orientado"].dtype == pd.Int64Dtype()
+        assert result["ciudad"].iloc[0] == "bogota"
 
     def test_does_not_drop_rows(self, raw_orientados):
         result = clean_orientados(raw_orientados.copy())
         assert len(result) == len(raw_orientados)
 
+    def test_does_not_produce_mes_evento(self, raw_orientados):
+        """mes_evento is the responsibility of build_orientacion_events, not here."""
+        result = clean_orientados(raw_orientados.copy())
+        assert "mes_evento"  not in result.columns
+        assert "anio_evento" not in result.columns
+
+    def test_nat_fechaevaluacion_tolerated(self, raw_orientados):
+        """A NaT in fechaevaluacion must not drop the row."""
+        result = clean_orientados(raw_orientados.copy())
+        assert len(result) == 2
+        assert pd.isna(result["fechaevaluacion_orientacion"].iloc[1])
+
 
 class TestCleanTalleres:
+    """
+    clean_talleres():
+      - Parses and renames dates with _taller suffix.
+      - Renames usuarionombre → tallerista.
+      - Lowercases string cell values.
+      - Does NOT aggregate/groupby — every input row stays as its own row.
+    """
 
-    def test_aggregated_to_one_row_per_document(self, raw_talleres):
+    def test_date_columns_renamed_with_taller_suffix(self, raw_talleres):
         result = clean_talleres(raw_talleres.copy())
-        assert result["numerodocumento"].nunique() == len(result)
+        assert "fechaagendamiento_taller" in result.columns
+        assert "fechaejecucion_taller"    in result.columns
+        assert "fechaevaluacion_taller"   in result.columns
 
-    def test_programagobierno_joined_with_comma(self, raw_talleres):
+    def test_original_date_column_names_removed(self, raw_talleres):
         result = clean_talleres(raw_talleres.copy())
-        val = str(result.loc[result["numerodocumento"] == "1000001",
-                              "programagobierno"].iloc[0])
-        assert "jovenes en accion" in val
-        assert "victimas del conflicto armado" in val
+        for old in ("fechaagendamiento", "fechaejecucion", "fechaevaluacion"):
+            assert old not in result.columns
 
-    def test_mes_taller_derived_correctly(self, raw_talleres):
+    def test_date_columns_are_datetime(self, raw_talleres):
         result = clean_talleres(raw_talleres.copy())
-        assert result["mes_taller"].iloc[0] == 3
+        for col in ["fechaagendamiento_taller",
+                    "fechaejecucion_taller",
+                    "fechaevaluacion_taller"]:
+            assert pd.api.types.is_datetime64_any_dtype(result[col])
 
     def test_usuarionombre_renamed_to_tallerista(self, raw_talleres):
         result = clean_talleres(raw_talleres.copy())
-        assert "tallerista" in result.columns
+        assert "tallerista"    in result.columns
         assert "usuarionombre" not in result.columns
+
+    def test_does_not_aggregate_rows(self, raw_talleres):
+        """Two raw rows for the same person → two cleaned rows, no groupby."""
+        result = clean_talleres(raw_talleres.copy())
+        assert len(result) == len(raw_talleres)
+
+    def test_string_values_lowercased(self, raw_talleres):
+        result = clean_talleres(raw_talleres.copy())
+        assert result["sexo"].iloc[0] == "f"
 
 
 class TestCleanRegistrados:
+    """
+    clean_registrados():
+      - Renames 'Número Documento' column to 'numerodocumento'.
+      - Aggregates to one row per person (groupby).
+      - Joins 'Programa de Gobierno' and 'Condiciones Especiales'
+        with comma when a person has multiple rows.
+    """
 
-    def test_numero_documento_column_renamed(self, raw_registrados):
+    def test_numerodocumento_column_present(self, raw_registrados):
         result = clean_registrados(raw_registrados.copy())
         assert "numerodocumento" in result.columns
 
@@ -294,7 +363,7 @@ class TestCleanRegistrados:
         result = clean_registrados(raw_registrados.copy())
         assert result["numerodocumento"].nunique() == len(result)
 
-    def test_programa_gobierno_joined_across_duplicates(self, raw_registrados):
+    def test_programa_gobierno_joined_when_duplicate_docs(self, raw_registrados):
         extra = raw_registrados.loc[[0]].copy()
         extra["Programa de Gobierno"] = "jovenes en accion"
         combined = pd.concat([raw_registrados, extra], ignore_index=True)
@@ -304,75 +373,236 @@ class TestCleanRegistrados:
         assert "victimas del conflicto armado" in val
         assert "jovenes en accion" in val
 
+    def test_condiciones_especiales_joined_when_duplicate_docs(self, raw_registrados):
+        extra = raw_registrados.loc[[0]].copy()
+        extra["Condiciones Especiales"] = "migrante"
+        combined = pd.concat([raw_registrados, extra], ignore_index=True)
+        result = clean_registrados(combined)
+        val = str(result.loc[result["numerodocumento"] == "1000001",
+                              "Condiciones Especiales"].iloc[0])
+        assert "discapacidad" in val
+        assert "migrante" in val
+
 
 class TestCleanPsicologas:
+    """
+    clean_psicologas():
+      - Renames 'NUMERO.1' to 'numerodocumento'.
+      - Lowercases cell values (column names remain UPPERCASE).
+      - Aggregates to one row per person.
+      - Joins 'POBLACIÓN' with comma when person has multiple rows.
+    """
 
-    def test_numero_documento_column_renamed(self, raw_psicologas):
+    def test_numerodocumento_column_present(self, raw_psicologas):
         result = clean_psicologas(raw_psicologas.copy())
         assert "numerodocumento" in result.columns
         assert "NUMERO.1" not in result.columns
 
-    def test_string_values_lowercased(self, raw_psicologas):
-        # clean_psicologas() lowercases cell values but not column names.
-        # The column remains 'NOMBRE' (uppercase) after cleaning.
+    def test_cell_values_are_lowercased(self, raw_psicologas):
         result = clean_psicologas(raw_psicologas.copy())
+        # Column names stay uppercase; only cell values are lowercased.
         assert result["NOMBRE"].iloc[0] == result["NOMBRE"].iloc[0].lower()
+
+    def test_column_names_remain_uppercase(self, raw_psicologas):
+        result = clean_psicologas(raw_psicologas.copy())
+        assert "EDAD" in result.columns
+        assert "POBLACIÓN" in result.columns
 
     def test_one_row_per_document(self, raw_psicologas):
         result = clean_psicologas(raw_psicologas.copy())
         assert result["numerodocumento"].nunique() == len(result)
 
-    def test_poblacion_joined_across_duplicates(self, raw_psicologas):
+    def test_poblacion_joined_when_duplicate_docs(self, raw_psicologas):
         extra = raw_psicologas.loc[[0]].copy()
         extra["POBLACIÓN"] = "reincorporado"
         combined = pd.concat([raw_psicologas, extra], ignore_index=True)
         result = clean_psicologas(combined)
-        # Column name is still 'POBLACIÓN' (uppercase) — only values are lowercased.
         val = str(result.loc[result["numerodocumento"] == "1000001",
                               "POBLACIÓN"].iloc[0]).lower()
         assert "vca" in val or "reincorporado" in val
 
 
 # ===========================================================================
-# 3. MERGING
+# 3. BUILD EVENT ROWS
 # ===========================================================================
 
-class TestMergeAll:
+class TestBuildOrientacionEvents:
+    """
+    build_orientacion_events():
+      - Adds tipo_evento = 'orientacion'.
+      - Derives mes_evento and anio_evento from fechaejecucion_orientacion.
+      - Drops rows where fechaejecucion_orientacion is NaT.
+    """
 
     @pytest.fixture
-    def merged(self, raw_orientados, raw_talleres, raw_registrados, raw_psicologas):
-        orientados  = clean_orientados(raw_orientados.copy())
-        talleres    = clean_talleres(raw_talleres.copy())
-        registrados = clean_registrados(raw_registrados.copy())
-        psicologas  = clean_psicologas(raw_psicologas.copy())
-        return merge_all(orientados, talleres, registrados, psicologas)
+    def cleaned(self, raw_orientados):
+        return clean_orientados(raw_orientados.copy())
 
-    def test_returns_dataframe(self, merged):
-        assert isinstance(merged, pd.DataFrame)
+    def test_tipo_evento_is_orientacion(self, cleaned):
+        result = build_orientacion_events(cleaned)
+        assert (result["tipo_evento"] == "orientacion").all()
 
-    def test_no_unresolved_x_y_columns(self, merged):
-        bad = [c for c in merged.columns if c.endswith("_x") or c.endswith("_y")]
-        assert bad == [], f"Unresolved duplicate columns: {bad}"
+    def test_mes_evento_derived_correctly(self, cleaned):
+        result = build_orientacion_events(cleaned)
+        assert result["mes_evento"].iloc[0] == 3
 
-    def test_condiciones_especiales_enriched_from_psicologas(self, merged):
-        row = merged[merged["numerodocumento"] == "1000001"]
-        if not row.empty:
-            val = str(row["condiciones_especiales"].iloc[0]).lower()
-            assert "vca" in val or "discapacidad" in val
+    def test_anio_evento_derived_correctly(self, cleaned):
+        result = build_orientacion_events(cleaned)
+        assert result["anio_evento"].iloc[0] == 2025
 
-    def test_edad_is_nullable_int(self, merged):
-        assert merged["edad"].dtype == pd.Int64Dtype()
+    def test_mes_evento_is_nullable_int64(self, cleaned):
+        result = build_orientacion_events(cleaned)
+        assert result["mes_evento"].dtype == pd.Int64Dtype()
 
-    def test_poblacion_column_dropped(self, merged):
-        assert "población" not in merged.columns
-        assert "poblacion" not in merged.columns
+    def test_anio_evento_is_nullable_int64(self, cleaned):
+        result = build_orientacion_events(cleaned)
+        assert result["anio_evento"].dtype == pd.Int64Dtype()
 
-    def test_does_not_lose_orientados_rows(self, merged, raw_orientados):
-        assert len(merged) >= len(raw_orientados)
+    def test_drops_rows_with_nat_fechaejecucion(self):
+        df = pd.DataFrame({
+            "fechaejecucion_orientacion": [pd.NaT, pd.Timestamp("2025-03-02")],
+            "fechaagendamiento_orientacion": [pd.NaT, pd.Timestamp("2025-03-01")],
+            "fechaevaluacion_orientacion":   [pd.NaT, pd.Timestamp("2025-03-03")],
+        })
+        result = build_orientacion_events(df)
+        assert len(result) == 1
+
+    def test_does_not_drop_valid_rows(self, cleaned):
+        result = build_orientacion_events(cleaned)
+        # Both raw rows have valid fechaejecucion; both must survive.
+        assert len(result) == len(cleaned)
+
+
+class TestBuildTallerEvents:
+    """
+    build_taller_events():
+      - Renames fechaejecucion_taller → fechaejecucion_orientacion (unified col).
+      - Adds tipo_evento = 'taller'.
+      - Derives mes_evento and anio_evento.
+      - Drops rows where fechaejecucion is NaT.
+    """
+
+    @pytest.fixture
+    def cleaned(self, raw_talleres):
+        return clean_talleres(raw_talleres.copy())
+
+    def test_tipo_evento_is_taller(self, cleaned):
+        result = build_taller_events(cleaned)
+        assert (result["tipo_evento"] == "taller").all()
+
+    def test_date_cols_renamed_to_orientacion_names(self, cleaned):
+        result = build_taller_events(cleaned)
+        assert "fechaejecucion_orientacion"    in result.columns
+        assert "fechaagendamiento_orientacion" in result.columns
+        assert "fechaevaluacion_orientacion"   in result.columns
+
+    def test_taller_date_col_names_removed(self, cleaned):
+        result = build_taller_events(cleaned)
+        assert "fechaejecucion_taller"    not in result.columns
+        assert "fechaagendamiento_taller" not in result.columns
+
+    def test_mes_evento_derived_correctly(self, cleaned):
+        result = build_taller_events(cleaned)
+        assert result["mes_evento"].iloc[0] == 3
+
+    def test_anio_evento_derived_correctly(self, cleaned):
+        result = build_taller_events(cleaned)
+        assert result["anio_evento"].iloc[0] == 2025
+
+    def test_drops_rows_with_nat_fechaejecucion(self, cleaned):
+        """raw_talleres row 1 has NaT fechaevaluacion but valid fechaejecucion
+        — only NaT fechaejecucion triggers a drop."""
+        result = build_taller_events(cleaned)
+        assert len(result) == len(cleaned)  # both rows have valid fechaejecucion
+
+    def test_drops_row_with_nat_fechaejecucion_taller(self):
+        df = pd.DataFrame({
+            "fechaejecucion_taller":    [pd.NaT, pd.Timestamp("2025-03-11")],
+            "fechaagendamiento_taller": [pd.NaT, pd.Timestamp("2025-03-10")],
+            "fechaevaluacion_taller":   [pd.NaT, pd.NaT],
+        })
+        result = build_taller_events(df)
+        assert len(result) == 1
 
 
 # ===========================================================================
-# 4. DERIVED COLUMNS
+# 4. ENRICHMENT
+# ===========================================================================
+
+class TestEnrichEvents:
+    """
+    enrich_events():
+      - Left-joins events ← registrados ← psicologas on numerodocumento.
+      - Appends POBLACIÓN to condiciones_especiales, then drops POBLACIÓN.
+      - Lowercases all column names.
+      - Coerces edad to nullable Int64.
+      - Never drops event rows (left join).
+    """
+
+    @pytest.fixture
+    def events(self, raw_orientados, raw_talleres):
+        cleaned_o = clean_orientados(raw_orientados.copy())
+        cleaned_t = clean_talleres(raw_talleres.copy())
+        oe = build_orientacion_events(cleaned_o)
+        te = build_taller_events(cleaned_t)
+        return pd.concat([oe, te], ignore_index=True)
+
+    @pytest.fixture
+    def registrados(self, raw_registrados):
+        return clean_registrados(raw_registrados.copy())
+
+    @pytest.fixture
+    def psicologas(self, raw_psicologas):
+        return clean_psicologas(raw_psicologas.copy())
+
+    def test_returns_dataframe(self, events, registrados, psicologas):
+        result = enrich_events(events, registrados, psicologas)
+        assert isinstance(result, pd.DataFrame)
+
+    def test_no_unresolved_x_y_columns(self, events, registrados, psicologas):
+        result = enrich_events(events, registrados, psicologas)
+        bad = [c for c in result.columns if c.endswith("_x") or c.endswith("_y")]
+        assert bad == [], f"Unresolved duplicate columns: {bad}"
+
+    def test_column_names_are_lowercase(self, events, registrados, psicologas):
+        result = enrich_events(events, registrados, psicologas)
+        for col in result.columns:
+            assert col == col.lower(), f"Column '{col}' not fully lowercase"
+
+    def test_poblacion_column_dropped(self, events, registrados, psicologas):
+        result = enrich_events(events, registrados, psicologas)
+        assert "población"  not in result.columns
+        assert "poblacion"  not in result.columns
+        assert "POBLACIÓN"  not in result.columns
+
+    def test_edad_is_nullable_int64(self, events, registrados, psicologas):
+        result = enrich_events(events, registrados, psicologas)
+        assert result["edad"].dtype == pd.Int64Dtype()
+
+    def test_condiciones_enriched_from_psicologas_poblacion(
+        self, events, registrados, psicologas
+    ):
+        """doc 1000001 → POBLACIÓN='VCA, discapacidad física' appended."""
+        result = enrich_events(events, registrados, psicologas)
+        row = result[result["numerodocumento"] == "1000001"]
+        assert not row.empty
+        val = str(row["condiciones_especiales"].iloc[0]).lower()
+        assert "vca" in val or "discapacidad" in val
+
+    def test_does_not_drop_event_rows(self, events, registrados, psicologas):
+        """Left join — no event rows may be lost."""
+        result = enrich_events(events, registrados, psicologas)
+        assert len(result) == len(events)
+
+    def test_programa_de_gobierno_column_present(
+        self, events, registrados, psicologas
+    ):
+        result = enrich_events(events, registrados, psicologas)
+        assert "programa_de_gobierno" in result.columns
+
+
+# ===========================================================================
+# 5. DERIVED COLUMNS
 # ===========================================================================
 
 class TestDeriveAgeRange:
@@ -407,21 +637,33 @@ class TestDeriveAgeRange:
     def test_does_not_drop_rows(self, df_ages):
         assert len(derive_age_range(df_ages)) == len(df_ages)
 
+    def test_boundary_18_is_in_18_28_band(self):
+        df = pd.DataFrame({"edad": pd.array([18], dtype="Int64")})
+        assert derive_age_range(df)["rango_de_edad"].iloc[0] == "18-28"
+
+    def test_boundary_29_is_in_29_39_band(self):
+        df = pd.DataFrame({"edad": pd.array([29], dtype="Int64")})
+        assert derive_age_range(df)["rango_de_edad"].iloc[0] == "29-39"
+
+    def test_boundary_60_is_in_over_60_band(self):
+        df = pd.DataFrame({"edad": pd.array([60], dtype="Int64")})
+        assert derive_age_range(df)["rango_de_edad"].iloc[0] == "> 60"
+
 
 # ===========================================================================
-# 5. POPULATION CLASSIFICATION
+# 6. POPULATION CLASSIFICATION
 # ===========================================================================
 
 class TestClassifyEthnicGroups:
 
     @pytest.mark.parametrize("text,expected", [
-        ("afrodescendiente",             "Afrodescendiente"),
-        ("comunidad negra del pacífico", "Afrodescendiente"),
-        ("mulato mestizo",               "Afrodescendiente"),
-        ("palenquero de san basilio",    "Afrodescendiente"),
-        ("raizal isleño",                "Raizal y/o Isleño"),
-        ("comunidad indígena",           "Indígenas"),
-        ("gitano nómada",                "Gitano"),
+        ("afrodescendiente",              "Afrodescendiente"),
+        ("comunidad negra del pacifico",  "Afrodescendiente"),
+        ("mulato mestizo",                "Afrodescendiente"),
+        ("palenquero de san basilio",     "Afrodescendiente"),
+        ("raizal isleno",                 "Raizal y/o Isleño"),
+        ("comunidad indigena",            "Indígenas"),
+        ("gitano nomada",                 "Gitano"),
     ])
     def test_single_group_detected(self, classify_df, text, expected):
         result = classify_ethnic_groups(classify_df(cond=text))
@@ -434,12 +676,12 @@ class TestClassifyEthnicGroups:
         assert "Afrodescendiente" in groups and "Raizal y/o Isleño" in groups
 
     def test_no_match_returns_nan(self, classify_df):
-        assert pd.isna(classify_ethnic_groups(classify_df(cond="sin condición"))
-                       ["grupos_etnicos"].iloc[0])
+        result = classify_ethnic_groups(classify_df(cond="sin condicion"))
+        assert pd.isna(result["grupos_etnicos"].iloc[0])
 
     def test_empty_string_returns_nan(self, classify_df):
-        assert pd.isna(classify_ethnic_groups(classify_df(cond=""))
-                       ["grupos_etnicos"].iloc[0])
+        result = classify_ethnic_groups(classify_df(cond=""))
+        assert pd.isna(result["grupos_etnicos"].iloc[0])
 
     def test_case_insensitive(self, classify_df):
         result = classify_ethnic_groups(classify_df(cond="AFRODESCENDIENTE"))
@@ -447,6 +689,11 @@ class TestClassifyEthnicGroups:
 
 
 class TestClassifyVca:
+    """
+    classify_vca() assigns the string "VCA" (uppercase).
+    After final_string_clean() it becomes "vca".
+    Unit tests here check the pre-final_string_clean value.
+    """
 
     def test_flagged_via_programa_de_gobierno(self, classify_df):
         result = classify_vca(classify_df(prog="victimas del conflicto armado"))
@@ -464,28 +711,32 @@ class TestClassifyVca:
         result = classify_vca(classify_df(cond="empleo general", prog="empleo"))
         assert pd.isna(result["vca"].iloc[0])
 
+    def test_keyword_armado_in_programa_sufficient(self, classify_df):
+        result = classify_vca(classify_df(prog="conflicto armado interno"))
+        assert result["vca"].iloc[0] == "VCA"
+
 
 class TestClassifyDisability:
 
     @pytest.mark.parametrize("text,expected_label", [
-        ("discapacidad cognitiva",    "Cognitiva o Intelectual"),
-        ("discapacidad intelectual",  "Cognitiva o Intelectual"),
-        ("discapacidad física",       "Física"),
-        ("discapacidad visual",       "Visual"),
-        ("discapacidad auditiva",     "Auditiva"),
-        ("discapacidad múltiple",     "Múltiple"),
-        ("sordoceguera severa",       "Sordoceguera"),
-        ("trastorno psicosocial",     "Psicosocial"),
-        ("en capacidad reducida",     "Discapacidad"),
+        ("discapacidad cognitiva",   "Cognitiva o Intelectual"),
+        ("discapacidad intelectual", "Cognitiva o Intelectual"),
+        ("discapacidad fisica",      "Física"),
+        ("discapacidad visual",      "Visual"),
+        ("discapacidad auditiva",    "Auditiva"),
+        ("discapacidad múltiple",    "Múltiple"),
+        ("sordoceguera severa",      "Sordoceguera"),
+        ("trastorno psicosocial",    "Psicosocial"),
+        ("en capacidad reducida",    "Discapacidad"),
     ])
     def test_disability_type_detected(self, classify_df, text, expected_label):
         result = classify_disability(classify_df(cond=text))
         assert result["discapacidad"].iloc[0] == expected_label
 
     def test_specific_label_wins_over_catchall(self, classify_df):
-        """'discapacidad física' matches both [ií]sic → Física AND
-        capacidad → Discapacidad. The specific label must win."""
-        result = classify_disability(classify_df(cond="discapacidad física"))
+        """Pattern order: Física ([íi]sic) is evaluated before Discapacidad
+        (capacidad).  The more specific label must win."""
+        result = classify_disability(classify_df(cond="discapacidad fisica"))
         assert result["discapacidad"].iloc[0] == "Física"
 
     def test_cognitiva_wins_over_catchall(self, classify_df):
@@ -493,11 +744,21 @@ class TestClassifyDisability:
         assert result["discapacidad"].iloc[0] == "Cognitiva o Intelectual"
 
     def test_no_match_returns_nan(self, classify_df):
-        assert pd.isna(classify_disability(classify_df(cond="sin condición"))
-                       ["discapacidad"].iloc[0])
+        result = classify_disability(classify_df(cond="sin condicion"))
+        assert pd.isna(result["discapacidad"].iloc[0])
+
+    def test_multiple_rows_only_first_matching_pattern_wins(self, classify_df):
+        """Rows already assigned a label must not be overwritten by later patterns."""
+        result = classify_disability(classify_df(cond="discapacidad intelectual y visual"))
+        # First matching pattern is r"ognitiv|telect" → Cognitiva o Intelectual
+        assert result["discapacidad"].iloc[0] == "Cognitiva o Intelectual"
 
 
 class TestClassifyMigrants:
+    """
+    classify_migrants() assigns "Migrante o Retornado" (mixed case).
+    After final_string_clean() → "migrante o retornado".
+    """
 
     def test_flagged_via_condiciones_migr(self, classify_df):
         result = classify_migrants(classify_df(cond="migrante venezolano"))
@@ -508,22 +769,31 @@ class TestClassifyMigrants:
         assert result["migrante"].iloc[0] == "Migrante o Retornado"
 
     def test_flagged_via_tipodocumento_ppt(self, classify_df):
-        result = classify_migrants(classify_df(tdoc="ppt permiso de proteccion"))
+        result = classify_migrants(classify_df(tdoc="ppt permiso"))
         assert result["migrante"].iloc[0] == "Migrante o Retornado"
 
     def test_flagged_via_tipodocumento_ce(self, classify_df):
-        result = classify_migrants(classify_df(tdoc="cedula ce extranjeria"))
+        result = classify_migrants(classify_df(tdoc="cedula extranjeria ce"))
+        assert result["migrante"].iloc[0] == "Migrante o Retornado"
+
+    def test_flagged_via_tipodocumento_dni(self, classify_df):
+        result = classify_migrants(classify_df(tdoc="dni extranjero"))
         assert result["migrante"].iloc[0] == "Migrante o Retornado"
 
     def test_no_match_returns_nan(self, classify_df):
         result = classify_migrants(classify_df(cond="residente local", tdoc="cc"))
         assert pd.isna(result["migrante"].iloc[0])
 
+    def test_result_column_is_object_dtype(self, classify_df):
+        """Must be object dtype so string assignment works on all pandas versions."""
+        result = classify_migrants(classify_df(cond="migrante"))
+        assert result["migrante"].dtype == object
+
 
 class TestClassifyVvg:
 
     def test_flagged_via_viole(self, classify_df):
-        result = classify_vvg(classify_df(cond="víctima de violencia intrafamiliar"))
+        result = classify_vvg(classify_df(cond="victima de violencia intrafamiliar"))
         assert result["vvg"].iloc[0] == "vvg"
 
     def test_flagged_via_vvg_text(self, classify_df):
@@ -531,14 +801,18 @@ class TestClassifyVvg:
         assert result["vvg"].iloc[0] == "vvg"
 
     def test_no_match_returns_nan(self, classify_df):
-        result = classify_vvg(classify_df(cond="situación económica difícil"))
+        result = classify_vvg(classify_df(cond="situacion economica dificil"))
         assert pd.isna(result["vvg"].iloc[0])
+
+    def test_result_column_is_object_dtype(self, classify_df):
+        result = classify_vvg(classify_df(cond="violencia"))
+        assert result["vvg"].dtype == object
 
 
 class TestClassifyReintegrated:
 
     def test_flagged_via_reincorporacion(self, classify_df):
-        result = classify_reintegrated(classify_df(cond="proceso de reincorporación farc"))
+        result = classify_reintegrated(classify_df(cond="proceso de reincorporacion farc"))
         assert result["reincorporados"].iloc[0] == "reincorporados"
 
     def test_flagged_via_reinsercion(self, classify_df):
@@ -549,130 +823,269 @@ class TestClassifyReintegrated:
         result = classify_reintegrated(classify_df(cond="sin antecedentes"))
         assert pd.isna(result["reincorporados"].iloc[0])
 
+    def test_result_column_is_object_dtype(self, classify_df):
+        result = classify_reintegrated(classify_df(cond="reincorporado"))
+        assert result["reincorporados"].dtype == object
+
 
 class TestRunAllClassifications:
 
     def test_all_classification_columns_present(self, classify_df):
         result = run_all_classifications(classify_df(cond="afrodescendiente").copy())
-        expected = {"grupos_etnicos", "vca", "discapacidad", "migrante", "vvg", "reincorporados"}
+        expected = {
+            "grupos_etnicos", "vca", "discapacidad",
+            "migrante", "vvg", "reincorporados",
+        }
         assert expected.issubset(set(result.columns))
 
     def test_no_rows_lost(self):
         df = pd.DataFrame({
-            "condiciones_especiales": ["a", "b", "c"],
+            "condiciones_especiales": ["afrodescendiente", "migrante", "ninguno"],
             "programa_de_gobierno":   ["", "", ""],
-            "tipodocumento":          ["cc", "cc", "cc"],
+            "tipodocumento":          ["cc", "ppt", "cc"],
         })
         assert len(run_all_classifications(df.copy())) == 3
 
+    def test_vca_uppercase_before_final_clean(self, classify_df):
+        """classify_vca assigns 'VCA' (uppercase) — final_string_clean lowercases it."""
+        result = run_all_classifications(
+            classify_df(prog="victimas del conflicto armado").copy()
+        )
+        assert result["vca"].iloc[0] == "VCA"
+
+    def test_migrante_mixed_case_before_final_clean(self, classify_df):
+        result = run_all_classifications(classify_df(cond="migrante", tdoc="ppt").copy())
+        assert result["migrante"].iloc[0] == "Migrante o Retornado"
+
 
 # ===========================================================================
-# 6. FINAL CLEANING
+# 7. FINAL CLEANING
 # ===========================================================================
 
 class TestFinalStringClean:
 
-    def test_nan_strings_replaced_with_pd_na(self):
-        df = pd.DataFrame({"a": ["nan", "hello", "NaN"], "b": [1, 2, 3]})
-        result = final_string_clean(df)
-        assert pd.isna(result["a"].iloc[0])
+    def test_null_like_strings_replaced_with_pd_na(self):
+        """All null-like string tokens must become pd.NA."""
+        for token in ["nan", "NaN", "none", "None", "<na>", "<NA>",
+                      "null", "Null", "nat", "n/a"]:
+            df = pd.DataFrame({"a": [token]})
+            result = final_string_clean(df)
+            assert pd.isna(result["a"].iloc[0]), \
+                f"Token '{token}' was not replaced with pd.NA"
 
     def test_strings_are_lowercased(self):
         df = pd.DataFrame({"a": ["HELLO", "World"]})
-        assert final_string_clean(df)["a"].iloc[0] == "hello"
+        result = final_string_clean(df)
+        assert result["a"].iloc[0] == "hello"
+        assert result["a"].iloc[1] == "world"
 
     def test_strings_are_stripped(self):
         df = pd.DataFrame({"a": ["  hello  ", " world "]})
-        assert final_string_clean(df)["a"].iloc[0] == "hello"
+        result = final_string_clean(df)
+        assert result["a"].iloc[0] == "hello"
 
     def test_does_not_drop_rows(self):
         df = pd.DataFrame({"a": ["nan", "real", "value"]})
         assert len(final_string_clean(df)) == 3
 
+    def test_vca_uppercased_by_classify_becomes_lowercase(self):
+        df = pd.DataFrame({"a": ["VCA"], "condiciones_especiales": ["vca"]})
+        result = final_string_clean(df)
+        assert result["a"].iloc[0] == "vca"
+
+    def test_migrante_mixed_case_becomes_lowercase(self):
+        df = pd.DataFrame({"a": ["Migrante o Retornado"]})
+        result = final_string_clean(df)
+        assert result["a"].iloc[0] == "migrante o retornado"
+
+    def test_date_columns_not_modified(self):
+        """DATE_SCALAR_COLS must be skipped by the string cleaner."""
+        ts = pd.Timestamp("2025-03-02")
+        df = pd.DataFrame({
+            "fechaejecucion_orientacion": [ts],
+            "a": ["HELLO"],
+        })
+        result = final_string_clean(df)
+        assert result["fechaejecucion_orientacion"].iloc[0] == ts
+
+    def test_numeric_cols_not_modified(self):
+        """NUMERIC_COLS must be skipped and retain their dtype."""
+        df = pd.DataFrame({
+            "edad":                pd.array([35], dtype="Int64"),
+            "mes_evento":          pd.array([3],  dtype="Int64"),
+            "anio_evento":         pd.array([2025], dtype="Int64"),
+            "porcentajeasistencia": [80.0],
+        })
+        result = final_string_clean(df)
+        assert result["edad"].dtype == pd.Int64Dtype()
+        assert result["porcentajeasistencia"].iloc[0] == 80.0
+
+    def test_real_values_not_nullified(self):
+        df = pd.DataFrame({"a": ["migrante o retornado", "vca", "reincorporados"]})
+        result = final_string_clean(df)
+        assert result["a"].iloc[0] == "migrante o retornado"
+        assert result["a"].iloc[1] == "vca"
+        assert result["a"].iloc[2] == "reincorporados"
+
 
 # ===========================================================================
-# 7. FILTERING
+# 8. FILTERING
 # ===========================================================================
 
 class TestFilterByMonth:
+    """
+    filter_by_month()         — any tipo_evento, matches mes_evento + anio_evento
+    filter_orientacion_by_month() — tipo_evento='orientacion' + month
+    filter_taller_by_month()      — tipo_evento='taller' + month
+    """
 
     @pytest.fixture
-    def month_df(self):
+    def event_df(self):
         return pd.DataFrame({
-            "mes_orientado": pd.array([3, 3, 4],  dtype="Int64"),
-            "año_orientado": pd.array([2025, 2025, 2025], dtype="Int64"),
-            "mes_taller":    pd.array([3, 4, 3],  dtype="Int64"),
-            "año_taller":    pd.array([2025, 2025, 2025], dtype="Int64"),
-            "sexo":          ["f", "m", "f"],
+            "tipo_evento": ["orientacion", "orientacion", "taller", "taller"],
+            "mes_evento":  pd.array([3, 3, 3, 4], dtype="Int64"),
+            "anio_evento": pd.array([2025, 2025, 2025, 2025], dtype="Int64"),
+            "sexo":        ["f", "m", "f", "f"],
         })
 
-    def test_filter_orientados_keeps_correct_rows(self, month_df):
-        assert len(filter_orientados_by_month(month_df, month=3, year=2025)) == 2
+    def test_filter_by_month_keeps_all_types(self, event_df):
+        result = filter_by_month(event_df, month=3, year=2025)
+        assert len(result) == 3   # 2 orientacion + 1 taller in March
 
-    def test_filter_orientados_empty_when_no_match(self, month_df):
-        assert filter_orientados_by_month(month_df, month=12, year=2025).empty
+    def test_filter_by_month_empty_when_no_match(self, event_df):
+        assert filter_by_month(event_df, month=12, year=2025).empty
 
-    def test_filter_talleres_keeps_correct_rows(self, month_df):
-        assert len(filter_talleres_by_month(month_df, month=3, year=2025)) == 2
-
-    def test_filter_talleres_excludes_different_year(self):
+    def test_filter_by_month_excludes_different_year(self):
         df = pd.DataFrame({
-            "mes_taller":  pd.array([3, 3], dtype="Int64"),
-            "año_taller":  pd.array([2024, 2025], dtype="Int64"),
+            "tipo_evento": ["orientacion", "orientacion"],
+            "mes_evento":  pd.array([3, 3], dtype="Int64"),
+            "anio_evento": pd.array([2024, 2025], dtype="Int64"),
         })
-        assert len(filter_talleres_by_month(df, month=3, year=2025)) == 1
+        result = filter_by_month(df, month=3, year=2025)
+        assert len(result) == 1
 
-    def test_filter_export_is_union_of_both(self, month_df):
-        """All three rows satisfy at least one of the two month conditions."""
-        assert len(filter_export(month_df, month=3, year=2025)) == 3
+    def test_filter_orientacion_keeps_only_orientacion(self, event_df):
+        result = filter_orientacion_by_month(event_df, month=3, year=2025)
+        assert len(result) == 2
+        assert (result["tipo_evento"] == "orientacion").all()
 
-    def test_filter_export_returns_empty_when_no_match(self, month_df):
-        assert filter_export(month_df, month=12, year=2025).empty
+    def test_filter_orientacion_empty_when_no_match(self, event_df):
+        assert filter_orientacion_by_month(event_df, month=12, year=2025).empty
 
-    def test_does_not_mutate_original(self, month_df):
-        original_len = len(month_df)
-        filter_orientados_by_month(month_df, month=3, year=2025)
-        assert len(month_df) == original_len
+    def test_filter_taller_keeps_only_taller(self, event_df):
+        result = filter_taller_by_month(event_df, month=3, year=2025)
+        assert len(result) == 1
+        assert (result["tipo_evento"] == "taller").all()
+
+    def test_filter_taller_empty_when_no_match(self, event_df):
+        assert filter_taller_by_month(event_df, month=12, year=2025).empty
+
+    def test_filter_does_not_mutate_original(self, event_df):
+        original_len = len(event_df)
+        filter_by_month(event_df, month=3, year=2025)
+        assert len(event_df) == original_len
 
 
 # ===========================================================================
-# 8. INTEGRATION
+# 9. INTEGRATION — full in-memory pipeline
 # ===========================================================================
 
-class TestIntegration:
+class TestFullPipeline:
+    """
+    Exercises the complete pipeline using in-memory DataFrames, without any
+    file I/O or database connections.  Tests the interaction between all
+    steps end-to-end.
+    """
 
     @pytest.fixture
     def full_df(self, raw_orientados, raw_talleres, raw_registrados, raw_psicologas):
+        """Run every step manually using the real public API."""
         orientados  = clean_orientados(raw_orientados.copy())
         talleres    = clean_talleres(raw_talleres.copy())
         registrados = clean_registrados(raw_registrados.copy())
         psicologas  = clean_psicologas(raw_psicologas.copy())
-        df = merge_all(orientados, talleres, registrados, psicologas)
-        df = derive_age_range(df)
-        df = run_all_classifications(df)
-        df = final_string_clean(df)
-        return df
+
+        oe = build_orientacion_events(orientados)
+        te = build_taller_events(talleres)
+        events = pd.concat([oe, te], ignore_index=True)
+
+        events = enrich_events(events, registrados, psicologas)
+        events = derive_age_range(events)
+        events = run_all_classifications(events)
+        events = final_string_clean(events)
+        return events
 
     def test_pipeline_returns_non_empty_dataframe(self, full_df):
         assert isinstance(full_df, pd.DataFrame) and not full_df.empty
 
-    def test_all_expected_columns_exist(self, full_df):
-        for col in ["grupos_etnicos", "vca", "discapacidad", "migrante",
-                    "vvg", "reincorporados", "rango_de_edad"]:
-            assert col in full_df.columns
+    def test_all_classification_columns_exist(self, full_df):
+        for col in ["grupos_etnicos", "vca", "discapacidad",
+                    "migrante", "vvg", "reincorporados", "rango_de_edad"]:
+            assert col in full_df.columns, f"Missing column: {col}"
 
-    def test_vca_flagged_for_armed_conflict_record(self, full_df):
-        """numerodocumento 1000001 has 'victimas del conflicto armado'
-        in programa_de_gobierno and must be flagged as VCA."""
+    def test_tipo_evento_values_are_valid(self, full_df):
+        valid = {"orientacion", "taller"}
+        assert set(full_df["tipo_evento"].unique()).issubset(valid)
+
+    def test_orientacion_rows_present(self, full_df):
+        assert (full_df["tipo_evento"] == "orientacion").any()
+
+    def test_taller_rows_present(self, full_df):
+        assert (full_df["tipo_evento"] == "taller").any()
+
+    def test_vca_flagged_and_lowercased_for_armed_conflict_record(self, full_df):
+        """doc 1000001: programa_de_gobierno has 'victimas del conflicto armado'
+        → classified as 'VCA', then final_string_clean → 'vca'."""
         row = full_df[full_df["numerodocumento"] == "1000001"]
-        if not row.empty:
-            assert row["vca"].iloc[0] == "vca"   # final_string_clean lowercases
+        assert not row.empty
+        assert row["vca"].iloc[0] == "vca"
 
-    def test_no_literal_nan_strings_remain(self, full_df):
-        for col in full_df.select_dtypes(include=["object", "string"]).columns:
-            assert (full_df[col] == "nan").sum() == 0, \
-                f"Column '{col}' still contains literal 'nan' strings"
+    def test_no_literal_null_strings_remain(self, full_df):
+        for col in full_df.select_dtypes(include=["object"]).columns:
+            for bad in ["nan", "none", "<na>", "null"]:
+                count = (full_df[col] == bad).sum()
+                assert count == 0, \
+                    f"Column '{col}' contains {count} literal '{bad}' strings"
 
     def test_no_unresolved_suffix_columns(self, full_df):
         bad = [c for c in full_df.columns if c.endswith("_x") or c.endswith("_y")]
-        assert bad == [], f"Unresolved duplicate columns after pipeline: {bad}"
+        assert bad == [], f"Unresolved duplicate columns: {bad}"
+
+    def test_mes_evento_and_anio_evento_populated(self, full_df):
+        assert full_df["mes_evento"].notna().any()
+        assert full_df["anio_evento"].notna().any()
+
+    def test_filter_orientacion_by_month_returns_correct_subset(self, full_df):
+        result = filter_orientacion_by_month(full_df, month=3, year=2025)
+        assert not result.empty
+        assert (result["tipo_evento"] == "orientacion").all()
+        assert (result["mes_evento"] == 3).all()
+        assert (result["anio_evento"] == 2025).all()
+
+    def test_filter_taller_by_month_returns_correct_subset(self, full_df):
+        result = filter_taller_by_month(full_df, month=3, year=2025)
+        assert not result.empty
+        assert (result["tipo_evento"] == "taller").all()
+
+    def test_filter_by_month_union_covers_both_types(self, full_df):
+        all_march = filter_by_month(full_df, month=3, year=2025)
+        orientacion = filter_orientacion_by_month(full_df, month=3, year=2025)
+        taller      = filter_taller_by_month(full_df, month=3, year=2025)
+        assert len(all_march) == len(orientacion) + len(taller)
+
+    def test_edad_is_nullable_int64_throughout(self, full_df):
+        assert full_df["edad"].dtype == pd.Int64Dtype()
+
+    def test_migrante_lowercased_after_final_clean(self, full_df):
+        """Any 'Migrante o Retornado' assigned by classify_migrants must be
+        lowercased to 'migrante o retornado' after final_string_clean."""
+        non_null = full_df["migrante"].dropna()
+        for val in non_null:
+            assert val == val.lower(), \
+                f"migrante value not lowercased: '{val}'"
+
+    def test_vca_lowercased_after_final_clean(self, full_df):
+        non_null = full_df["vca"].dropna()
+        for val in non_null:
+            assert val == val.lower(), \
+                f"vca value not lowercased: '{val}'"

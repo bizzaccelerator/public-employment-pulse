@@ -32,7 +32,7 @@ variables:
 tasks:
   - id: download_file
     type: io.kestra.plugin.gcp.gcs.Download
-    from: gs://operations-raw-data_public-employment-pulse/BD_Registro_2024_2025_acumulado.xlsx
+    from: gs://operations-raw-data_public-employment-pulse/BD_Registro_2024_2025_2026_acumulado.xlsx
 
   - id: reading_monthly_registries
     type: io.kestra.plugin.scripts.python.Commands
@@ -68,36 +68,25 @@ tasks:
     namespaceFiles:
       enabled: true
       include:
-        - "registro_hv.py"        # module under test (already used by task 2)
-        - "test_registro_hv.py"   # pytest test suite
-        - "run_tests.py"          # orchestrator: runs pytest, writes output files
+        - "registro_hv.py"        
+        - "test_registro_hv.py"   
+        - "run_tests.py"          
     beforeCommands:
-      # pytest-json-report produces the machine-readable JSON that run_tests.py
-      # parses into test_results.json and test_report.txt
       - pip install pandas numpy openpyxl pyarrow fastparquet pytest pytest-json-report --quiet
     commands:
       - "python run_tests.py"
     outputFiles:
-      - "test_results.json"   # machine-readable -- consumed by notify_test_results
-      - "test_report.txt"     # human-readable  -- attached to notification email
+      - "test_results.json"   
+      - "test_report.txt"     
 
   - id: notify_test_results
     type: io.kestra.plugin.notifications.mail.MailSend
-    # allowFailure: true ensures this notification task always executes.
-    # Without it, a non-zero exit from run_data_quality_tests would halt
-    # the pipeline before the email fires -- the team would have no alert.
-    # The overall execution is still marked FAILED by Kestra when tests fail.
     allowFailure: true
     from: "{{ kv('SENDER_EMAIL') }}"
     to: "{{ kv('RECIPIENT_EMAILS') }}"
-    subject: >-
-      {% if outputs.run_data_quality_tests.exitCode == 0 %}
-        Tests PASSED - registro_hv {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}
-      {% else %}
-        Tests FAILED - registro_hv {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}
-      {% endif %}
+    subject: "{% if outputs.run_data_quality_tests.exitCode == 0 %}Tests PASSED{% else %}Tests FAILED{% endif %} - registro_hv {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}"
     htmlTextContent: |
-      {% set results = outputs.run_data_quality_tests.outputFiles['test_results.json'] | json %}
+      {% set results = json(read(outputs.run_data_quality_tests.outputFiles['test_results.json'])) %}
 
       <h2>
         {% if results.all_passed %}

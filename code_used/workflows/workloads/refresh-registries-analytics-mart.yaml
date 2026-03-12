@@ -100,14 +100,14 @@ tasks:
               WHEN edad BETWEEN 29 AND 39 THEN '29-39'
               WHEN edad BETWEEN 40 AND 49 THEN '40-49'
               WHEN edad BETWEEN 50 AND 59 THEN '50-59'
-              WHEN edad > 60 THEN 'Más de 60'
+              WHEN edad >= 60 THEN '60 o mayor'
               ELSE 'Desconocido'
             END as rango_edad,
             CASE 
               WHEN edad < 18 THEN 'Menor de 18'
               WHEN edad BETWEEN 18 AND 28 THEN '18-28'
               WHEN edad BETWEEN 29 AND 59 THEN '29-59'
-              WHEN edad > 60 THEN 'Más de 60'
+              WHEN edad >= 60 THEN '60 o mayor'
               ELSE 'Desconocido'
             END as rango_etareo,
             genero as sexo,
@@ -321,14 +321,14 @@ tasks:
               WHEN edad BETWEEN 29 AND 39 THEN '29-39'
               WHEN edad BETWEEN 40 AND 49 THEN '40-49'
               WHEN edad BETWEEN 50 AND 59 THEN '50-59'
-              WHEN edad > 60 THEN 'Más de 60'
+              WHEN edad >= 60 THEN '60 o mayor'
               ELSE 'Desconocido'
             END as rango_edad,
             CASE 
               WHEN edad < 18 THEN 'Menor de 18'
               WHEN edad BETWEEN 18 AND 28 THEN '18-28'
               WHEN edad BETWEEN 29 AND 59 THEN '29-59'
-              WHEN edad > 60 THEN 'Más de 60'
+              WHEN edad >= 60 THEN '60 o mayor'
               ELSE 'Desconocido'
             END as rango_etareo,
             genero as sexo,

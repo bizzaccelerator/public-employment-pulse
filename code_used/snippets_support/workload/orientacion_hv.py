@@ -1,10 +1,23 @@
 """
 ETL script for processing psychological orientation (Orientación HV) data.
 
-Structured as pure, testable functions following the same conventions as
-registro_hv.py.  The main() function at the bottom orchestrates the full
-pipeline and is the only entry point that reads environment variables or
-writes files to disk.
+OUTPUT MODEL — one row per session event
+-----------------------------------------
+Each orientation session and each workshop session produces its own row.
+A person who attended 2 orientation sessions and 1 workshop produces 3 rows.
+
+Row structure:
+  tipo_evento            : 'orientacion' | 'taller'
+  fechaagendamiento      : scalar date of THIS session
+  fechaejecucion         : scalar date of THIS session
+  fechaevaluacion        : scalar date of THIS session
+  mes_evento             : integer month of fechaejecucion
+  anio_evento            : integer year  of fechaejecucion
+  + all person demographic / programme columns (repeated per row)
+
+The parquet filename pattern is:  orientados_<year>_<month>.parquet
+Only rows whose mes_evento / anio_evento matches the requested month/year
+are exported.
 """
 
 import pandas as pd
@@ -13,74 +26,71 @@ import os
 
 
 # ---------------------------------------------------------------------------
+# 0. CONSTANTS
+# ---------------------------------------------------------------------------
+
+# Scalar date column names used after exploding
+ORIENTACION_DATE_COLS = [
+    "fechaagendamiento_orientacion",
+    "fechaejecucion_orientacion",
+    "fechaevaluacion_orientacion",
+]
+TALLER_DATE_COLS = [
+    "fechaagendamiento_taller",
+    "fechaejecucion_taller",
+    "fechaevaluacion_taller",
+]
+
+# Person-level demographic / programme columns that are repeated on every row
+PERSON_COLS = [
+    "numerodocumento", "tipodocumento", "correoelectronico",
+    "primernombre", "segundonombre", "primerapellido", "segundoapellido",
+    "sexo", "ciudad", "departamento", "edad", "rango_de_edad",
+    "area", "tipo", "subtipo", "nombreportafolio", "nombreconvocatoria",
+    "aprobacion", "porcentajeasistencia",
+    "prestadornombre", "institucionnombre", "instituciondireccion",
+    "institucionmunicipio", "instituciondepartamento",
+    "programagobiernosino", "programagobierno", "alianzasentidadesexternas",
+    "agencianombre", "numerotelefono", "programa_de_gobierno",
+    "condiciones_especiales",
+    "grupos_etnicos", "vca", "discapacidad", "migrante", "vvg", "reincorporados",
+]
+
+# ---------------------------------------------------------------------------
+# NULL-LIKE STRINGS — produced by astype(str) on None / pd.NA / np.nan
+# across different pandas versions (1.x, 2.x, 3.x).
+#
+# pandas < 3  : None  -> "None",  pd.NA (StringDtype) -> "<NA>"
+# pandas >= 3 : both  -> "nan"
+#
+# After .str.lower() they become: "none", "<na>", "nan"
+# All must be mapped back to pd.NA in final_string_clean so that
+# PostgreSQL / BigQuery receive a proper NULL, not a literal string.
+# ---------------------------------------------------------------------------
+_NULL_LIKE_STRINGS = {"nan", "none", "<na>", "nat", "null", "n/a"}
+
+
+# ---------------------------------------------------------------------------
 # 1. INGESTION
 # ---------------------------------------------------------------------------
 
 def load_orientados(filepath: str, sheet_name: str = "BD_Indicador_1") -> pd.DataFrame:
-    """
-    Read the 'orientados' sheet from the SISE-psicología Excel file.
-
-    Normalisation applied:
-      - Column names lowercased.
-      - Spaces replaced with underscores.
-
-    Args:
-        filepath:   Path to the Excel file (or Kestra virtual path 'sise_psico').
-        sheet_name: Name of the sheet to read.
-
-    Returns:
-        pd.DataFrame with normalised column names.
-    """
     df = pd.read_excel(filepath, sheet_name=sheet_name)
     df.columns = df.columns.str.lower()
     return df
 
 
 def load_talleres(filepath: str, sheet_name: str = "Reporte_Indicador_2") -> pd.DataFrame:
-    """
-    Read the 'talleres FIS' sheet from the SISE-psicología Excel file.
-
-    Same normalisation as load_orientados().
-
-    Args:
-        filepath:   Path to the Excel file (or Kestra virtual path 'sise_psico').
-        sheet_name: Name of the sheet to read.
-
-    Returns:
-        pd.DataFrame with normalised column names.
-    """
     df = pd.read_excel(filepath, sheet_name=sheet_name)
     df.columns = df.columns.str.lower()
     return df
 
 
 def load_registrados(filepath: str, sheet_name: str = "BD_Acumulado-2024-2026") -> pd.DataFrame:
-    """
-    Read the cumulative CV registrations Excel file.
-
-    Args:
-        filepath:   Path to the Excel file (or Kestra virtual path 'registries').
-        sheet_name: Name of the sheet to read.
-
-    Returns:
-        Raw pd.DataFrame (column normalisation handled in clean_registrados()).
-    """
     return pd.read_excel(filepath, sheet_name=sheet_name)
 
 
 def load_psicologas(filepath: str, sheet_name: str = "Orientados") -> pd.DataFrame:
-    """
-    Read the psychologist tracking Excel file.
-
-    Drops the known spurious 'Unnamed: 22' column if present.
-
-    Args:
-        filepath:   Path to the Excel file (or Kestra virtual path 'psicologist').
-        sheet_name: Name of the sheet to read.
-
-    Returns:
-        pd.DataFrame ready for cleaning.
-    """
     df = pd.read_excel(filepath, sheet_name=sheet_name)
     if "Unnamed: 22" in df.columns:
         df = df.drop("Unnamed: 22", axis=1)
@@ -88,35 +98,35 @@ def load_psicologas(filepath: str, sheet_name: str = "Orientados") -> pd.DataFra
 
 
 # ---------------------------------------------------------------------------
-# 2. CLEANING
+# 2. CLEANING — produce one row per session (NOT per person)
 # ---------------------------------------------------------------------------
 
 def clean_orientados(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Parse date columns, lowercase string values, and rename columns for
-    the orientados DataFrame.
+    Clean the orientados sheet and return ONE ROW PER ORIENTATION SESSION.
 
-    Steps:
-      1. Parse 'fechaagendamiento', 'fechaejecucion', 'fechaevaluacion' as
-         datetime.
-      2. Lowercase all string cell values.
-      3. Rename columns to their semantic names.
-      4. Derive integer 'mes_orientado' and 'año_orientado' from
-         'fechaejecucion_orientacion'.
+    Each raw row already represents one session; we just parse dates,
+    lowercase strings, and rename columns.  No groupby is performed.
 
-    Args:
-        df: Raw orientados DataFrame from load_orientados().
-
-    Returns:
-        Cleaned and enriched DataFrame.
+    Returns columns:
+        numerodocumento, fechaagendamiento_orientacion,
+        fechaejecucion_orientacion, fechaevaluacion_orientacion,
+        orientador, indicador, tipodireccionamiento, tipodocumento,
+        correoelectronico, primernombre, segundonombre, primerapellido,
+        segundoapellido, sexo, ciudad, departamento,
+        area, tipo, subtipo, nombreportafolio, nombreconvocatoria,
+        aprobacion, porcentajeasistencia, prestadornombre, institucionnombre,
+        instituciondireccion, institucionmunicipio, instituciondepartamento,
+        programagobiernosino, alianzasentidadesexternas, agencianombre,
+        numerotelefono
     """
-    date_cols = ["fechaagendamiento", "fechaejecucion", "fechaevaluacion"]
-    for col in date_cols:
+    for col in ["fechaagendamiento", "fechaejecucion", "fechaevaluacion"]:
         if col in df.columns:
-            df[col] = pd.to_datetime(df[col])
+            df[col] = pd.to_datetime(df[col], errors="coerce")
 
     for col in df.columns:
-        df[col] = df[col].apply(lambda x: x.lower() if isinstance(x, str) else x)
+        if df[col].dtype == object:
+            df[col] = df[col].apply(lambda x: x.lower() if isinstance(x, str) else x)
 
     df = df.rename(columns={
         "fechaagendamiento": "fechaagendamiento_orientacion",
@@ -125,41 +135,27 @@ def clean_orientados(df: pd.DataFrame) -> pd.DataFrame:
         "usuarionombre":     "orientador",
     })
 
-    df["mes_orientado"] = (
-        pd.to_numeric(df["fechaejecucion_orientacion"].dt.month, errors="coerce")
-        .round()
-        .astype("Int64")
+    str_cols = df.select_dtypes(include=["object", "str"]).columns
+    df[str_cols] = df[str_cols].apply(
+        lambda col: col.map(lambda v: v.lower() if isinstance(v, str) else v)
     )
-    df["año_orientado"] = (
-        pd.to_numeric(df["fechaejecucion_orientacion"].dt.year, errors="coerce")
-        .round()
-        .astype("Int64")
-    )
+
     return df
 
 
 def clean_talleres(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Parse date columns, lowercase string values, rename columns, and
-    derive 'mes_taller' / 'año_taller' for the talleres DataFrame.
+    Clean the talleres sheet and return ONE ROW PER WORKSHOP SESSION.
 
-    Then aggregate to one row per 'numerodocumento', keeping the first
-    value for most fields and joining unique 'programagobierno' values
-    with commas.
-
-    Args:
-        df: Raw talleres DataFrame from load_talleres().
-
-    Returns:
-        Aggregated and cleaned DataFrame (one row per person).
+    Same logic as clean_orientados — each raw row is one session.
     """
-    date_cols = ["fechaagendamiento", "fechaejecucion", "fechaevaluacion"]
-    for col in date_cols:
+    for col in ["fechaagendamiento", "fechaejecucion", "fechaevaluacion"]:
         if col in df.columns:
-            df[col] = pd.to_datetime(df[col])
+            df[col] = pd.to_datetime(df[col], errors="coerce")
 
     for col in df.columns:
-        df[col] = df[col].apply(lambda x: x.lower() if isinstance(x, str) else x)
+        if df[col].dtype == object:
+            df[col] = df[col].apply(lambda x: x.lower() if isinstance(x, str) else x)
 
     df = df.rename(columns={
         "fechaagendamiento": "fechaagendamiento_taller",
@@ -168,48 +164,12 @@ def clean_talleres(df: pd.DataFrame) -> pd.DataFrame:
         "usuarionombre":     "tallerista",
     })
 
-    df["mes_taller"] = (
-        pd.to_numeric(df["fechaejecucion_taller"].dt.month, errors="coerce")
-        .round()
-        .astype("Int64")
-    )
-    df["año_taller"] = (
-        pd.to_numeric(df["fechaejecucion_taller"].dt.year, errors="coerce")
-        .round()
-        .astype("Int64")
-    )
-
-    first_cols = [
-        "indicador", "tipodireccionamiento", "tipodocumento", "correoelectronico",
-        "primernombre", "segundonombre", "primerapellido", "segundoapellido",
-        "sexo", "ciudad", "departamento", "area", "tipo", "subtipo",
-        "nombreportafolio", "nombreconvocatoria", "fechaagendamiento_taller",
-        "fechaejecucion_taller", "fechaevaluacion_taller", "aprobacion",
-        "porcentajeasistencia", "prestadornombre", "institucionnombre",
-        "instituciondireccion", "institucionmunicipio", "instituciondepartamento",
-        "programagobiernosino", "alianzasentidadesexternas", "tallerista",
-        "agencianombre", "numerotelefono", "mes_taller", "año_taller",
-    ]
-    agg_spec = {col: "first" for col in first_cols if col in df.columns}
-    if "programagobierno" in df.columns:
-        agg_spec["programagobierno"] = lambda x: ",".join(map(str, x.dropna().unique()))
-
-    return df.groupby("numerodocumento").agg(agg_spec).reset_index()
+    return df
 
 
 def clean_registrados(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Rename the key identifier columns in the registrados DataFrame and
-    aggregate to one row per 'numerodocumento'.
-
-    'Programa de Gobierno' and 'Condiciones Especiales' are joined across
-    multiple rows with commas so no information is lost.
-
-    Args:
-        df: Raw registrados DataFrame from load_registrados().
-
-    Returns:
-        Aggregated DataFrame (one row per person).
+    Aggregate to one row per person — used only to enrich demographics.
     """
     df.columns = df.columns.str.replace("Número Documento", "numerodocumento")
 
@@ -234,17 +194,7 @@ def clean_registrados(df: pd.DataFrame) -> pd.DataFrame:
 
 def clean_psicologas(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Rename the key identifier column in the psicologas DataFrame,
-    lowercase all string values, and aggregate to one row per
-    'numerodocumento'.
-
-    'POBLACIÓN' and 'TALLER FIS' are joined with commas across rows.
-
-    Args:
-        df: Raw psicologas DataFrame from load_psicologas().
-
-    Returns:
-        Aggregated DataFrame (one row per person).
+    Aggregate to one row per person — used only to enrich EDAD / POBLACIÓN.
     """
     df.columns = df.columns.str.replace("NUMERO.1", "numerodocumento")
 
@@ -267,71 +217,91 @@ def clean_psicologas(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# 3. MERGING
+# 3. BUILD EVENT ROWS
 # ---------------------------------------------------------------------------
 
-def merge_all(
-    orientados: pd.DataFrame,
-    talleres:   pd.DataFrame,
+def build_orientacion_events(orientados: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert the cleaned orientados DataFrame into event rows.
+
+    Each row represents one orientation session.  Adds:
+        tipo_evento    = 'orientacion'
+        mes_evento     = month of fechaejecucion_orientacion
+        anio_evento    = year  of fechaejecucion_orientacion
+
+    Drops rows where fechaejecucion_orientacion is NaT.
+    """
+    df = orientados.copy()
+    df["tipo_evento"] = "orientacion"
+
+    df["mes_evento"]  = df["fechaejecucion_orientacion"].dt.month.astype("Int64")
+    df["anio_evento"] = df["fechaejecucion_orientacion"].dt.year.astype("Int64")
+
+    # Drop rows with no execution date — they cannot be placed in any month
+    df = df.dropna(subset=["fechaejecucion_orientacion"])
+    return df
+
+
+def build_taller_events(talleres: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert the cleaned talleres DataFrame into event rows.
+
+    Each row represents one workshop session.  Adds:
+        tipo_evento    = 'taller'
+        mes_evento     = month of fechaejecucion_taller
+        anio_evento    = year  of fechaejecucion_taller
+
+    Drops rows where fechaejecucion_taller is NaT.
+    """
+    df = talleres.copy()
+    df["tipo_evento"] = "taller"
+
+    # Rename taller date cols to generic names for the unified events table
+    df = df.rename(columns={
+        "fechaagendamiento_taller": "fechaagendamiento_orientacion",
+        "fechaejecucion_taller":    "fechaejecucion_orientacion",
+        "fechaevaluacion_taller":   "fechaevaluacion_orientacion",
+    })
+
+    df["mes_evento"]  = df["fechaejecucion_orientacion"].dt.month.astype("Int64")
+    df["anio_evento"] = df["fechaejecucion_orientacion"].dt.year.astype("Int64")
+
+    df = df.dropna(subset=["fechaejecucion_orientacion"])
+    return df
+
+
+# ---------------------------------------------------------------------------
+# 4. MERGING — enrich events with person demographics
+# ---------------------------------------------------------------------------
+
+def enrich_events(
+    events: pd.DataFrame,
     registrados: pd.DataFrame,
     psicologas:  pd.DataFrame,
 ) -> pd.DataFrame:
     """
-    Merge all four source DataFrames into a single wide DataFrame.
+    Left-join the events table with registrados and psicologas to bring in
+    demographics (edad, condiciones_especiales, programa_de_gobierno, etc.).
 
-    Merge order:
-      1. orientados  ← talleres        (outer join on numerodocumento)
-         Duplicate columns from the join (suffix _x / _y) are resolved
-         with combine_first() so that orientados values take precedence.
-      2. result      ← registrados     (left join; brings in 'Programa de
-         Gobierno' and 'Condiciones Especiales')
-      3. result      ← psicologas      (left join; brings in 'EDAD' and
-         'POBLACIÓN')
-      4. 'POBLACIÓN' is appended to 'condiciones_especiales' then dropped.
-      5. All column names are lowercased and spaces replaced by underscores.
-      6. 'edad' is coerced to nullable Int64.
+    The join is always on numerodocumento.  Events rows are never dropped.
 
-    Args:
-        orientados:  Cleaned orientados DataFrame.
-        talleres:    Cleaned talleres DataFrame.
-        registrados: Cleaned registrados DataFrame.
-        psicologas:  Cleaned psicologas DataFrame.
-
-    Returns:
-        Merged DataFrame ready for classification.
+    Steps:
+        1. Merge events ← registrados  (brings Programa de Gobierno,
+           Condiciones Especiales)
+        2. Merge events ← psicologas   (brings EDAD, POBLACIÓN)
+        3. Append POBLACIÓN to condiciones_especiales, then drop POBLACIÓN.
+        4. Normalise all column names to lowercase_with_underscores.
+        5. Coerce edad to nullable Int64.
     """
-    # --- 1. orientados + talleres (outer) ---
-    df = orientados.merge(talleres, on="numerodocumento", how="outer")
-
-    shared_cols = [
-        "indicador", "tipodireccionamiento", "tipodocumento", "correoelectronico",
-        "primernombre", "segundonombre", "primerapellido", "segundoapellido",
-        "sexo", "ciudad", "departamento", "area", "tipo", "subtipo",
-        "nombreportafolio", "nombreconvocatoria", "aprobacion",
-        "porcentajeasistencia", "prestadornombre", "institucionnombre",
-        "instituciondireccion", "institucionmunicipio", "instituciondepartamento",
-        "programagobiernosino", "programagobierno", "alianzasentidadesexternas",
-        "agencianombre", "numerotelefono",
-    ]
-    for col in shared_cols:
-        x, y = f"{col}_x", f"{col}_y"
-        if x in df.columns and y in df.columns:
-            df[col] = df[x].astype(object).combine_first(df[y].astype(object))
-            df.drop(columns=[x, y], inplace=True)
-
-    # --- 2. + registrados ---
-    df = df.merge(
+    df = events.merge(
         registrados[["numerodocumento", "Programa de Gobierno", "Condiciones Especiales"]],
         on="numerodocumento", how="left",
     )
-
-    # --- 3. + psicologas ---
     df = df.merge(
         psicologas[["numerodocumento", "EDAD", "POBLACIÓN"]],
         on="numerodocumento", how="left",
     )
 
-    # --- 4. Enrich condiciones_especiales with POBLACIÓN ---
     df["Condiciones Especiales"] = df.apply(
         lambda row: (
             f"{row['Condiciones Especiales']}, {row['POBLACIÓN']}"
@@ -342,42 +312,26 @@ def merge_all(
     )
     df = df.drop("POBLACIÓN", axis=1)
 
-    # --- 5. Normalise column names ---
     df.columns = df.columns.str.lower().str.replace(" ", "_")
-
-    # --- 6. Coerce edad ---
     df["edad"] = pd.to_numeric(df["edad"], errors="coerce").round().astype("Int64")
-
     return df
 
 
 # ---------------------------------------------------------------------------
-# 4. DERIVED COLUMNS
+# 5. DERIVED COLUMNS
 # ---------------------------------------------------------------------------
 
 def derive_age_range(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add a 'rango_de_edad' column based on the 'edad' column.
-
-    Bands:
-      <18 | 18-28 | 29-39 | 40-49 | 50-59 | >60
-
-    Args:
-        df: DataFrame with an integer 'edad' column.
-
-    Returns:
-        DataFrame with 'rango_de_edad' added.
-    """
-    def _band(age) -> str | float:
+    def _band(age) -> str:
         try:
             age = int(age)
         except (TypeError, ValueError):
             return np.nan
-        if 0 < age < 18:   return "< 18"
-        if 18 <= age < 29:  return "18-28"
-        if 29 <= age < 40:  return "29-39"
-        if 40 <= age < 50:  return "40-49"
-        if 50 <= age < 60:  return "50-59"
+        if 0 < age < 18:     return "< 18"
+        if 18 <= age < 29:   return "18-28"
+        if 29 <= age < 40:   return "29-39"
+        if 40 <= age < 50:   return "40-49"
+        if 50 <= age < 60:   return "50-59"
         if 60 <= age < 2000: return "> 60"
         return np.nan
 
@@ -386,59 +340,30 @@ def derive_age_range(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# 5. POPULATION CLASSIFICATION
+# 6. POPULATION CLASSIFICATION
 # ---------------------------------------------------------------------------
 
 def classify_ethnic_groups(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Derive the 'grupos_etnicos' column from 'condiciones_especiales'.
-
-    See registro_hv.py for full pattern documentation.
-
-    Args:
-        df: DataFrame with 'condiciones_especiales' column.
-
-    Returns:
-        DataFrame with 'grupos_etnicos' column added.
-    """
     df["condiciones_especiales"] = (
         df["condiciones_especiales"].astype(str).str.lower().fillna("")
     )
-
     patterns = {
         "Afrodescendiente":  r"negr|afro|mulat|palen",
         "Raizal y/o Isleño": r"raiz",
-        "Indígenas":         r"indí",
+        "Indígenas":         r"ind[íi]",
         "Gitano":            r"git",
     }
-
     def _classify(text: str):
-        groups = [
-            label for label, pat in patterns.items()
-            if pd.Series([text]).str.contains(pat, regex=True).iloc[0]
-        ]
+        groups = [l for l, p in patterns.items()
+                  if pd.Series([text]).str.contains(p, regex=True).iloc[0]]
         return groups if groups else np.nan
-
     df["grupos_etnicos"] = df["condiciones_especiales"].apply(_classify)
     return df
 
 
 def classify_vca(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Flag victims of the armed conflict ('VCA').
-
-    Condition: 'programa_de_gobierno' contains 'armado'  OR
-               'condiciones_especiales' contains 'vca' / 'v.c.a'.
-
-    Args:
-        df: DataFrame with both relevant columns.
-
-    Returns:
-        DataFrame with 'vca' column added.
-    """
     df["programa_de_gobierno"] = df["programa_de_gobierno"].fillna("").astype(str)
     df["vca"] = pd.Series(dtype="object")
-
     mask = (
         df["programa_de_gobierno"].str.contains("armado", na=False) |
         df["condiciones_especiales"].str.contains(r"vca|v\.c\.a", na=False)
@@ -448,23 +373,10 @@ def classify_vca(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def classify_disability(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Classify disability type from 'condiciones_especiales'.
-
-    The first matching pattern wins; 'capacidad' is the catch-all and
-    is intentionally placed last.
-
-    Args:
-        df: DataFrame with 'condiciones_especiales' column.
-
-    Returns:
-        DataFrame with 'discapacidad' column added.
-    """
     df["discapacidad"] = pd.Series([np.nan] * len(df), dtype="object")
-
     patterns = {
         r"ognitiv|telect": "Cognitiva o Intelectual",
-        r"[ií]sic":        "Física",
+        r"[íi]sic":        "Física",
         r"visual":         "Visual",
         r"auditiva":       "Auditiva",
         r"múltiple":       "Múltiple",
@@ -472,90 +384,49 @@ def classify_disability(df: pd.DataFrame) -> pd.DataFrame:
         r"psicosocial":    "Psicosocial",
         r"capacidad":      "Discapacidad",
     }
-
     for pattern, label in patterns.items():
-        unclassified = df["discapacidad"].isna()
-        mask = unclassified & df["condiciones_especiales"].str.contains(
-            pattern, case=False, na=False
-        )
+        mask = df["discapacidad"].isna() & df["condiciones_especiales"].str.contains(
+            pattern, case=False, na=False)
         df.loc[mask, "discapacidad"] = label
-
     return df
 
 
 def classify_migrants(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Flag migrants and returnees ('Migrante o Retornado').
-
-    Condition: 'condiciones_especiales' contains 'migr'/'retor'  OR
-               'tipodocumento' contains 'dni', 'ppt', or 'ce'
-               (fragments of common migrant document types).
-
-    Args:
-        df: DataFrame with 'condiciones_especiales' and 'tipodocumento'.
-
-    Returns:
-        DataFrame with 'migrante' column added.
-    """
-    df["migrante"] = ""
+    # FIX: initialise as object dtype with np.nan so that:
+    #   (a) string labels can be assigned via .loc without a TypeError
+    #       (pandas 3 raises TypeError when assigning a str into float64)
+    #   (b) no StringDtype is used — StringDtype silently converts None back
+    #       to pd.NA, which serialises as "<NA>"/"<na>" on pandas < 3
+    #   (c) the .where()/.replace() dance that produced "none"/"<na>" strings
+    #       is eliminated entirely
+    df["migrante"] = pd.Series(np.nan, index=df.index, dtype=object)
     mask = (
         df["condiciones_especiales"].str.contains(r"migr|retor", na=False) |
         df["tipodocumento"].str.contains(r"dni|ppt|ce", na=False)
     )
     df.loc[mask, "migrante"] = "Migrante o Retornado"
-    df["migrante"] = df["migrante"].where(df["migrante"] != "", other=pd.NA)
     return df
 
 
 def classify_vvg(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Flag victims of gender-based violence ('vvg').
-
-    Condition: 'condiciones_especiales' contains 'viole' or 'vvg'.
-
-    Args:
-        df: DataFrame with 'condiciones_especiales' column.
-
-    Returns:
-        DataFrame with 'vvg' column added.
-    """
-    df["vvg"] = ""
+    # FIX: object dtype + direct label assignment — see classify_migrants.
+    # Replaces the fragile .where(col != "", other=pd.NA).replace({pd.NA: None})
+    # chain that produced "none"/"<na>" literal strings on pandas < 3.
+    df["vvg"] = pd.Series(np.nan, index=df.index, dtype=object)
     mask = df["condiciones_especiales"].str.contains(r"viole|vvg", na=False)
     df.loc[mask, "vvg"] = "vvg"
-    df["vvg"] = df["vvg"].where(df["vvg"] != "", other=pd.NA)
     return df
 
 
 def classify_reintegrated(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Flag people in a reintegration/reincorporation programme.
-
-    Condition: 'condiciones_especiales' contains 'rein'.
-
-    Args:
-        df: DataFrame with 'condiciones_especiales' column.
-
-    Returns:
-        DataFrame with 'reincorporados' column added.
-    """
-    df["reincorporados"] = ""
+    # FIX: same pattern as classify_vvg / classify_migrants.
+    df["reincorporados"] = pd.Series(np.nan, index=df.index, dtype=object)
     mask = df["condiciones_especiales"].str.contains("rein", na=False)
     df.loc[mask, "reincorporados"] = "reincorporados"
-    df["reincorporados"] = df["reincorporados"].where(df["reincorporados"] != "", other=pd.NA)
     return df
 
 
 def run_all_classifications(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Convenience wrapper: run all six population-classification steps
-    in the correct order.
-
-    Args:
-        df: Merged and date-parsed DataFrame.
-
-    Returns:
-        DataFrame with all classification columns added.
-    """
     df = classify_ethnic_groups(df)
     df = classify_vca(df)
     df = classify_disability(df)
@@ -566,157 +437,138 @@ def run_all_classifications(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# 6. FINAL CLEANING
+# 7. FINAL CLEANING
 # ---------------------------------------------------------------------------
 
 def final_string_clean(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Lowercase and strip all object columns, then replace the string
-    'nan' with pd.NA.
+    Lowercase and strip all object / string columns, then replace every
+    null-like string with pd.NA so PostgreSQL / BigQuery receive a proper NULL.
 
-    Args:
-        df: Fully classified DataFrame.
+    Null-like strings that must be normalised
+    -----------------------------------------
+    Different pandas versions serialise None / pd.NA differently through
+    astype(str):
 
-    Returns:
-        Cleaned DataFrame.
+      pandas < 3  :  None              -> "None"  -> after .lower() -> "none"
+                     pd.NA (StringDtype) -> "<NA>" -> after .lower() -> "<na>"
+      pandas >= 3 :  both              -> "nan"
+
+    Only replacing "nan" (the original code) silently passes "none" and
+    "<na>" through to the database as literal strings on pandas < 3.
+    We replace the full set of known null-like tokens after lowercasing.
+
+    Skips:
+      - DATE_SCALAR_COLS: datetime columns must stay as datetime64
+      - NUMERIC_COLS: porcentajeasistencia, edad, mes_evento, anio_evento
+        must stay numeric so Parquet writes DOUBLE/INT64, not BYTE_ARRAY.
     """
+    DATE_SCALAR_COLS = {
+        "fechaagendamiento_orientacion",
+        "fechaejecucion_orientacion",
+        "fechaevaluacion_orientacion",
+    }
+    NUMERIC_COLS = {
+        "porcentajeasistencia", "edad", "mes_evento", "anio_evento",
+    }
     for col in df.columns:
+        if col in DATE_SCALAR_COLS or col in NUMERIC_COLS:
+            continue
         if (
-            df[col].dtype == object
-            or pd.api.types.is_string_dtype(df[col])
+            df[col].dtype == object or pd.api.types.is_string_dtype(df[col])
         ) and not pd.api.types.is_bool_dtype(df[col]):
             df[col] = df[col].astype(str).str.lower().str.strip()
-    df = df.replace("nan", pd.NA)
+
+    # FIX: replace the complete set of null-like tokens, not just "nan".
+    # This is the single most important fix: it catches "none" (from None on
+    # pandas < 3) and "<na>" (from pd.NA / StringDtype on pandas < 3) as well
+    # as "nan", "nat", "null", "n/a" and empty strings.
+    df = df.replace(list(_NULL_LIKE_STRINGS), pd.NA)
     return df
 
 
 # ---------------------------------------------------------------------------
-# 7. FILTERING & EXPORT
+# 8. FILTERING & EXPORT
 # ---------------------------------------------------------------------------
 
-def filter_orientados_by_month(df: pd.DataFrame, month: int, year: int) -> pd.DataFrame:
-    """
-    Keep rows where 'fechaejecucion_orientacion' falls in month/year.
-
-    Args:
-        df:    Fully transformed DataFrame.
-        month: Target month (1–12).
-        year:  Target year.
-
-    Returns:
-        Filtered DataFrame.
-    """
-    mask = (df["mes_orientado"] == month) & (df["año_orientado"] == year)
-    return df[mask].copy()
+def filter_by_month(df: pd.DataFrame, month: int, year: int) -> pd.DataFrame:
+    """Keep only rows whose mes_evento / anio_evento match month/year."""
+    return df[
+        (df["mes_evento"] == month) & (df["anio_evento"] == year)
+    ].copy()
 
 
-def filter_talleres_by_month(df: pd.DataFrame, month: int, year: int) -> pd.DataFrame:
-    """
-    Keep rows where 'fechaejecucion_taller' falls in month/year.
-
-    Args:
-        df:    Fully transformed DataFrame.
-        month: Target month (1–12).
-        year:  Target year.
-
-    Returns:
-        Filtered DataFrame.
-    """
-    mask = (df["mes_taller"] == month) & (df["año_taller"] == year)
-    return df[mask].copy()
+def filter_orientacion_by_month(df: pd.DataFrame, month: int, year: int) -> pd.DataFrame:
+    return df[
+        (df["tipo_evento"] == "orientacion") &
+        (df["mes_evento"] == month) &
+        (df["anio_evento"] == year)
+    ].copy()
 
 
-def filter_export(df: pd.DataFrame, month: int, year: int) -> pd.DataFrame:
-    """
-    Keep rows that appear in the target month either as an orientation
-    session OR as a taller session.
-
-    This mirrors the original export filter:
-        (mes_orientado == month) | (mes_taller == month AND año_taller == year)
-
-    Args:
-        df:    Fully transformed DataFrame.
-        month: Target month (1–12).
-        year:  Target year.
-
-    Returns:
-        Filtered DataFrame for export.
-    """
-    mask = (
-        (df["mes_orientado"] == month) |
-        ((df["mes_taller"] == month) & (df["año_taller"] == year))
-    )
-    return df[mask].copy()
+def filter_taller_by_month(df: pd.DataFrame, month: int, year: int) -> pd.DataFrame:
+    return df[
+        (df["tipo_evento"] == "taller") &
+        (df["mes_evento"] == month) &
+        (df["anio_evento"] == year)
+    ].copy()
 
 
 def export_parquet(df: pd.DataFrame, month: int, year: int) -> str:
     """
-    Export the monthly DataFrame to a compressed parquet file.
+    Export the monthly event rows to a compressed parquet file.
 
-    Filename pattern: orientados_<year>_<month>.parquet
+    Enforces correct Parquet physical types before writing:
+      porcentajeasistencia → float64   (Parquet DOUBLE,  BigQuery FLOAT64)
+      edad, mes_evento, anio_evento → Int64  (Parquet INT64, BigQuery INT64)
+    Date columns are written as TIMESTAMP (pandas datetime64).
 
-    Args:
-        df:    Monthly DataFrame to export.
-        month: Integer month used in the filename.
-        year:  Integer year used in the filename.
-
-    Returns:
-        The filename that was written.
+    Filename: orientados_<year>_<month>.parquet
     """
+    df = df.copy()
+
+    float_cols = ["porcentajeasistencia"]
+    int_cols   = ["edad", "mes_evento", "anio_evento"]
+
+    for col in float_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("float64")
+    for col in int_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+
     filename = f"orientados_{year}_{month}.parquet"
     df.to_parquet(filename, compression="zstd")
     return filename
 
 
 def write_count(count: int, filepath: str) -> None:
-    """
-    Write a record count to a plain-text file for Kestra outputFiles.
-
-    Args:
-        count:    Number of records.
-        filepath: Destination filename (e.g. 'psico_count.txt').
-    """
     with open(filepath, "w") as f:
         f.write(str(count))
 
 
 # ---------------------------------------------------------------------------
-# 8. REPORTING
+# 9. REPORTING
 # ---------------------------------------------------------------------------
 
 def print_summary(df: pd.DataFrame, month: int, year: int) -> None:
-    """
-    Print population breakdowns for psychological orientation sessions
-    and FIS workshops held during month/year.
+    monthly = filter_by_month(df, month, year)
 
-    Args:
-        df:    Fully transformed DataFrame (all months).
-        month: Month to summarise.
-        year:  Year to summarise.
-    """
-    def _count(mask) -> int:
-        return int(mask.sum())
-
-    for label, f_month in [
-        ("orientados", (df["mes_orientado"] == month) & (df["año_orientado"] == year)),
-        ("taller FIS", (df["mes_taller"]    == month) & (df["año_taller"]    == year)),
-    ]:
-        print(f"\n--- {label} mes {month}/{year} ---")
-        print(f"  Hombres:   {_count(f_month & (df['sexo'] == 'm'))}")
-        print(f"  Mujeres:   {_count(f_month & (df['sexo'] == 'f'))}")
-        print(f"  PCD:       {_count(f_month & df['discapacidad'].notna())}")
-        print(f"  VCA:       {_count(f_month & df['vca'].notna())}")
-        print(f"  VVG:       {_count(f_month & df['vvg'].notna())}")
-        print(f"  Migrantes: {_count(f_month & df['migrante'].notna())}")
-        print(f"  Étnicos:   {_count(f_month & df['grupos_etnicos'].notna())}")
-        print(f"  Reinc.:    {_count(f_month & df['reincorporados'].notna())}")
-        print(f"  ≥60 años:  {_count(f_month & (df['edad'] >= 60))}")
-        print(f"  29-59:     {_count(f_month & (df['edad'] >= 29) & (df['edad'] < 60))}")
-        print(f"  ≤28 años:  {_count(f_month & (df['edad'] <= 28))}")
+    for label, tipo in [("orientados", "orientacion"), ("taller FIS", "taller")]:
+        sub = monthly[monthly["tipo_evento"] == tipo]
+        print(f"\n--- {label} mes {month}/{year} ({len(sub)} sesiones) ---")
+        print(f"  Hombres:   {(sub['sexo'] == 'm').sum()}")
+        print(f"  Mujeres:   {(sub['sexo'] == 'f').sum()}")
+        print(f"  PCD:       {sub['discapacidad'].notna().sum()}")
+        print(f"  VCA:       {sub['vca'].notna().sum()}")
+        print(f"  VVG:       {sub['vvg'].notna().sum()}")
+        print(f"  Migrantes: {sub['migrante'].notna().sum()}")
+        print(f"  Étnicos:   {sub['grupos_etnicos'].notna().sum()}")
+        print(f"  Reinc.:    {sub['reincorporados'].notna().sum()}")
 
 
 # ---------------------------------------------------------------------------
-# 9. MAIN PIPELINE ORCHESTRATOR
+# 10. MAIN PIPELINE ORCHESTRATOR
 # ---------------------------------------------------------------------------
 
 def run_pipeline(
@@ -727,48 +579,48 @@ def run_pipeline(
     year: int,
 ) -> pd.DataFrame:
     """
-    Execute the full ETL pipeline and return the combined monthly DataFrame.
+    Execute the full ETL pipeline and return the combined events DataFrame
+    (all months, all event types).
 
     Steps:
-        1.  load_orientados / load_talleres / load_registrados / load_psicologas
-        2.  clean_orientados / clean_talleres / clean_registrados / clean_psicologas
-        3.  merge_all
-        4.  derive_age_range
-        5.  run_all_classifications
-        6.  final_string_clean
-
-    The returned DataFrame contains ALL months; use filter_orientados_by_month(),
-    filter_talleres_by_month(), or filter_export() to slice it.
-
-    Args:
-        sise_psico_path:  Path to the SISE-psicología Excel file.
-        registries_path:  Path to the cumulative registrations Excel file.
-        psicologist_path: Path to the psychologist tracking Excel file.
-        month:            Target month (1–12).
-        year:             Target year.
+        1.  Load all four source files.
+        2.  clean_orientados / clean_talleres  → one row per session
+        3.  clean_registrados / clean_psicologas → one row per person (for enrichment)
+        4.  build_orientacion_events / build_taller_events
+        5.  Combine orientation + taller events into one DataFrame
+        6.  enrich_events with demographics
+        7.  derive_age_range
+        8.  run_all_classifications
+        9.  final_string_clean
 
     Returns:
-        Fully processed DataFrame.
+        Flat events DataFrame — one row per session.
     """
-    orientados  = clean_orientados(load_orientados(sise_psico_path))
-    talleres    = clean_talleres(load_talleres(sise_psico_path))
-    registrados = clean_registrados(load_registrados(registries_path))
-    psicologas  = clean_psicologas(load_psicologas(psicologist_path))
+    orientados   = clean_orientados(load_orientados(sise_psico_path))
+    talleres     = clean_talleres(load_talleres(sise_psico_path))
+    registrados  = clean_registrados(load_registrados(registries_path))
+    psicologas   = clean_psicologas(load_psicologas(psicologist_path))
 
-    df = merge_all(orientados, talleres, registrados, psicologas)
-    df = derive_age_range(df)
-    df = run_all_classifications(df)
-    df = final_string_clean(df)
-    return df
+    orientacion_events = build_orientacion_events(orientados)
+    taller_events      = build_taller_events(talleres)
+
+    # Union all events — column sets differ (orientador vs tallerista), so
+    # pd.concat fills missing columns with NaN automatically.
+    events = pd.concat([orientacion_events, taller_events], ignore_index=True)
+
+    events = enrich_events(events, registrados, psicologas)
+    events = derive_age_range(events)
+    events = run_all_classifications(events)
+    events = final_string_clean(events)
+    return events
 
 
 def main():
     """
-    Entry point when the script is run directly (or by Kestra).
+    Entry point for Kestra execution.
 
-    Reads MONTH and YEAR from environment variables, executes the full
-    pipeline against the Kestra virtual paths, writes parquet output and
-    count text files, and prints a summary.
+    Reads MONTH and YEAR from environment variables, runs the pipeline,
+    exports the monthly parquet, and writes count text files.
     """
     month = int(os.getenv("MONTH"))
     year  = int(os.getenv("YEAR"))
@@ -777,19 +629,19 @@ def main():
 
     print_summary(df, month, year)
 
-    oriented  = filter_orientados_by_month(df, month, year)
-    workshops = filter_talleres_by_month(df, month, year)
-    export_df = filter_export(df, month, year)
+    export_df  = filter_by_month(df, month, year)
+    oriented   = filter_orientacion_by_month(df, month, year)
+    workshops  = filter_taller_by_month(df, month, year)
 
     filename = export_parquet(export_df, month, year)
 
     num_oriented  = len(oriented)
     num_workshops = len(workshops)
 
-    print(f"\nNumber of people attended by psychologist during {month}/{year}: {num_oriented}")
+    print(f"\nOrientation sessions exported for {month}/{year}: {num_oriented}")
     write_count(num_oriented, "psico_count.txt")
 
-    print(f"Number of people who attended workshops during {month}/{year}: {num_workshops}")
+    print(f"Workshop sessions exported for {month}/{year}: {num_workshops}")
     write_count(num_workshops, "workshop_count.txt")
 
     print(f"Output written to: {filename}")

@@ -303,6 +303,29 @@ print(df[f_poblaciones & f_colocados]['nombre_de_la_empresa'].unique())
 # ## EXPORTAR DOCUMENTO
 f_export = (df['mes_registro'] == months[prev_month]) | (df['fecha_envío_hojas_de_vida_a_la_empresa'].dt.month == float(prev_month)) | (df['mes_de_colocación_en_plataforma'] == months[prev_month])
 intermediation = df[f_export]
+
+# Keep only expected columns, drop anything unexpected from the Excel
+expected_columns = [
+    'item', 'mes_registro', 'convenio', 'gestión_vacante_', 'población', 'no.',
+    'código_proceso', 'nombre_de_la_empresa', 'nombre_de_la_vacante',
+    'puestos_de_trabajo_en_plataforma', 'fecha_de_publicacion_de_la_vacante',
+    'fecha_de_vencimiento_de_la_vacante', 'hojas_de_vida_remitidas',
+    'fecha_envío_hojas_de_vida_a_la_empresa', 'nombre_del_candidato',
+    'cedula', 'telefono', 'edad', 'rango_de_edad', 'nivel_educativo',
+    'formacion', 'sexo', 'barrio', 'condicion', 'gestor', 'intermediador_',
+    'llamada_/_convocatoria/_base_de_datos', 'observación_intermediación',
+    'observación_gestión', 'observación_del_candidato',
+    'mes_de_colocación_en_plataforma', 'colocado', 'semana_publicacion_vacante',
+    'mes_publicacion_vacante', 'tipo_de_vacante', 'año_publicacion_vacante',
+    'discapacidad', 'vca', 'vvg', 'migrante', 'etnias', 'reincorporados'
+]
+
+unexpected = [col for col in intermediation.columns if col not in expected_columns]
+if unexpected:
+    print(f"WARNING: Dropping unexpected columns from Excel: {unexpected}")
+
+intermediation = intermediation[[col for col in expected_columns if col in intermediation.columns]]
+
 # Exporting the data
 intermediation.to_parquet(f'intermediacion_{prev_year}_{prev_month}.parquet', compression='zstd')
 

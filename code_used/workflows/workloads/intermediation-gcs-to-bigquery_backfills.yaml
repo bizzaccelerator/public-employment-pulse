@@ -21,6 +21,7 @@ variables:
   gcs_path: "gs://employment-agency-operational-data/{{ inputs.data_processed }}/{{ trigger.date | date('yyyy') }}/{{ vars.month_name }}/intermediacion_hv_{{ trigger.date | date('yyyy') }}_{{ trigger.date | date('M') }}.parquet"
   bq_dataset: "operations_co"
   bq_table: "{{ inputs.data_processed }}"
+  bq_staging_table: "{{ inputs.data_processed }}_staging"
 
 tasks:
   - id: log_workflow_start
@@ -30,6 +31,7 @@ tasks:
       File: {{ render(vars.gcs_path) }}
       Dataset: {{ render(vars.bq_dataset) }}
       Table: {{ render(vars.bq_table) }}
+      Staging Table: {{ render(vars.bq_staging_table) }}
       Load Mode: {{ inputs.load_mode }}
 
   - id: check_gcs_file_exists
@@ -107,13 +109,13 @@ tasks:
         require_partition_filter=false
       );
 
-  - id: load_parquet_to_bigquery
+  - id: load_parquet_to_staging
     type: io.kestra.plugin.gcp.bigquery.LoadFromGcs
-    from: 
+    from:
       - "{{ render(vars.gcs_path) }}"
-    destinationTable: "{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}"
+    destinationTable: "{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_staging_table) }}"
     format: PARQUET
-    writeDisposition: "{{ inputs.load_mode }}"
+    writeDisposition: WRITE_TRUNCATE
     autodetect: false
     schema:
       fields:
@@ -253,6 +255,26 @@ tasks:
           type: TIMESTAMP
           mode: NULLABLE
 
+  - id: merge_into_main_table
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      MERGE `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}` AS target
+      USING (
+        SELECT s.*
+        FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_staging_table) }}` s
+        LEFT JOIN `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}` t
+          ON s.unique_row_id = t.unique_row_id
+        WHERE t.unique_row_id IS NULL
+      ) AS source
+      ON target.unique_row_id = source.unique_row_id
+      WHEN NOT MATCHED THEN
+        INSERT ROW;
+
+  - id: drop_staging_table
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      DROP TABLE IF EXISTS `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_staging_table) }}`;
+
   - id: verify_load_count
     type: io.kestra.plugin.gcp.bigquery.Query
     sql: |
@@ -325,7 +347,7 @@ tasks:
       File: {{ render(vars.gcs_path) }}
       Dataset: {{ render(vars.bq_dataset) }}
       Table: {{ render(vars.bq_table) }}
-      Load Mode: {{ inputs.load_mode }}
+      Load Mode: MERGE (deduplication via unique_row_id)
       
       Load completed successfully. Check email for detailed statistics.
 
@@ -347,10 +369,12 @@ tasks:
       <p><strong>Dataset:</strong> {{ render(vars.bq_dataset) }}</p>
       <p><strong>Table:</strong> {{ render(vars.bq_table) }}</p>
       <p><strong>Source File:</strong> {{ render(vars.gcs_path) }}</p>
-      <p><strong>Load Mode:</strong> {{ inputs.load_mode }}</p>
-      
-      <p>This table contains person-vacancy interactions where the same person can appear multiple times for different job vacancies.</p>
-      
+      <p><strong>Load Mode:</strong> MERGE (deduplication via unique_row_id)</p>
+
+      <p>This table contains person-vacancy interactions where the same person can appear
+      multiple times for different job vacancies. Rows already present in the main table
+      (matched by unique_row_id) are skipped automatically.</p>
+
       <p>Please see attached files for load statistics and data quality summary.</p>
       
       <p><em>Workflow executed at: {{ now() }}</em></p>

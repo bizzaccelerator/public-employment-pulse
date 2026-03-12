@@ -34,6 +34,7 @@ variables:
   gcs_path: "gs://employment-agency-operational-data/{{ inputs.data_processed }}/{{ inputs.year_of_interest }}/{{ vars.month_name }}/intermediacion_hv_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}.parquet"
   bq_dataset: "operations_co"
   bq_table: "{{ inputs.data_processed }}"
+  bq_staging_table: "{{ inputs.data_processed }}_staging"
 
 tasks:
   - id: log_workflow_start
@@ -43,6 +44,7 @@ tasks:
       File: {{ render(vars.gcs_path) }}
       Dataset: {{ render(vars.bq_dataset) }}
       Table: {{ render(vars.bq_table) }}
+      Staging Table: {{ render(vars.bq_staging_table) }}
       Load Mode: {{ inputs.load_mode }}
 
   - id: check_gcs_file_exists
@@ -120,13 +122,13 @@ tasks:
         require_partition_filter=false
       );
 
-  - id: load_parquet_to_bigquery
+  - id: load_parquet_to_staging
     type: io.kestra.plugin.gcp.bigquery.LoadFromGcs
-    from: 
+    from:
       - "{{ render(vars.gcs_path) }}"
-    destinationTable: "{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}"
+    destinationTable: "{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_staging_table) }}"
     format: PARQUET
-    writeDisposition: "{{ inputs.load_mode }}"
+    writeDisposition: WRITE_TRUNCATE
     autodetect: false
     schema:
       fields:
@@ -266,6 +268,57 @@ tasks:
           type: TIMESTAMP
           mode: NULLABLE
 
+  - id: merge_into_main_table
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      MERGE `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}` AS target
+      USING (
+        SELECT s.*
+        FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_staging_table) }}` s
+        LEFT JOIN `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}` t
+          ON s.unique_row_id = t.unique_row_id
+        WHERE t.unique_row_id IS NULL
+      ) AS source
+      ON target.unique_row_id = source.unique_row_id
+      WHEN NOT MATCHED THEN
+        INSERT (
+          unique_row_id, filename, item, mes_registro, convenio, gestion_vacante,
+          poblacion, `no`, codigo_proceso, nombre_de_la_empresa, nombre_de_la_vacante,
+          puestos_de_trabajo_en_plataforma, fecha_de_publicacion_de_la_vacante,
+          fecha_de_vencimiento_de_la_vacante, hojas_de_vida_remitidas,
+          fecha_envio_hojas_de_vida_a_la_empresa, nombre_del_candidato, cedula,
+          telefono, edad, rango_de_edad, nivel_educativo, formacion, sexo, barrio,
+          condicion, gestor, intermediador, llamada_convocatoria_base_de_datos,
+          observacion_intermediacion, observacion_gestion, observacion_del_candidato,
+          mes_de_colocacion_en_plataforma, colocado, semana_publicacion_vacante,
+          mes_publicacion_vacante, tipo_de_vacante, anio_publicacion_vacante,
+          discapacidad, vca, vvg, migrante, etnias, reincorporados,
+          created_at, loaded_at
+        )
+        VALUES (
+          source.unique_row_id, source.filename, source.item, source.mes_registro,
+          source.convenio, source.gestion_vacante, source.poblacion, source.`no`,
+          source.codigo_proceso, source.nombre_de_la_empresa, source.nombre_de_la_vacante,
+          source.puestos_de_trabajo_en_plataforma, source.fecha_de_publicacion_de_la_vacante,
+          source.fecha_de_vencimiento_de_la_vacante, source.hojas_de_vida_remitidas,
+          source.fecha_envio_hojas_de_vida_a_la_empresa, source.nombre_del_candidato,
+          source.cedula, source.telefono, source.edad, source.rango_de_edad,
+          source.nivel_educativo, source.formacion, source.sexo, source.barrio,
+          source.condicion, source.gestor, source.intermediador,
+          source.llamada_convocatoria_base_de_datos, source.observacion_intermediacion,
+          source.observacion_gestion, source.observacion_del_candidato,
+          source.mes_de_colocacion_en_plataforma, source.colocado,
+          source.semana_publicacion_vacante, source.mes_publicacion_vacante,
+          source.tipo_de_vacante, source.anio_publicacion_vacante, source.discapacidad,
+          source.vca, source.vvg, source.migrante, source.etnias, source.reincorporados,
+          source.created_at, CURRENT_TIMESTAMP()  -- ← explicitly sets loaded_at
+        );
+
+  - id: drop_staging_table
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      DROP TABLE IF EXISTS `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_staging_table) }}`;
+
   - id: verify_load_count
     type: io.kestra.plugin.gcp.bigquery.Query
     sql: |
@@ -338,7 +391,7 @@ tasks:
       File: {{ render(vars.gcs_path) }}
       Dataset: {{ render(vars.bq_dataset) }}
       Table: {{ render(vars.bq_table) }}
-      Load Mode: {{ inputs.load_mode }}
+      Load Mode: MERGE (deduplication via unique_row_id)
       
       Load completed successfully. Check email for detailed statistics.
 
@@ -360,12 +413,14 @@ tasks:
       <p><strong>Dataset:</strong> {{ render(vars.bq_dataset) }}</p>
       <p><strong>Table:</strong> {{ render(vars.bq_table) }}</p>
       <p><strong>Source File:</strong> {{ render(vars.gcs_path) }}</p>
-      <p><strong>Load Mode:</strong> {{ inputs.load_mode }}</p>
-      
-      <p>This table contains person-vacancy interactions where the same person can appear multiple times for different job vacancies.</p>
-      
+      <p><strong>Load Mode:</strong> MERGE (deduplication via unique_row_id)</p>
+
+      <p>This table contains person-vacancy interactions where the same person can appear
+      multiple times for different job vacancies. Rows already present in the main table
+      (matched by unique_row_id) are skipped automatically.</p>
+
       <p>Please see attached files for load statistics and data quality summary.</p>
-      
+
       <p><em>Workflow executed at: {{ now() }}</em></p>
     attachments:
       - name: load_statistics.csv

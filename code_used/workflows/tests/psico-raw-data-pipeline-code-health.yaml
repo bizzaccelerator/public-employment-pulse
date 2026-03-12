@@ -25,7 +25,7 @@ namespace: public_employment_pulse
 # Both workflows share the same namespace files:
 #   orientacion_hv.py       the module under test
 #   test_orientacion_hv.py  the pytest suite
-#   run_tests.py            the pytest orchestrator
+#   run_tests_orientacion.py the pytest orchestrator
 #
 # There is intentionally NO subflow call from psico-raw-data-pipeline into
 # this workflow.  Each workflow is triggered independently.  The embedded
@@ -60,13 +60,13 @@ tasks:
     namespaceFiles:
       enabled: true
       include:
-        - "orientacion_hv.py"        # module under test
-        - "test_orientacion_hv.py"   # pytest suite (same file as in the main pipeline)
-        - "run_tests.py"             # pytest orchestrator (same file as in the main pipeline)
+        - "orientacion_hv.py"          # module under test
+        - "test_orientacion_hv.py"     # pytest suite
+        - "run_tests_orientacion.py"   # pytest orchestrator
     beforeCommands:
       - pip install pandas numpy openpyxl pyarrow fastparquet pytest pytest-json-report --quiet
     commands:
-      - "python run_tests.py"
+      - "python run_tests_orientacion.py"
     outputFiles:
       - "test_results.json"
       - "test_report.txt"
@@ -80,20 +80,18 @@ tasks:
     allowFailure: true
     from: "{{ kv('SENDER_EMAIL') }}"
     to: "{{ kv('RECIPIENT_EMAILS') }}"
-    subject: >-
-      {% if outputs.run_code_health_tests.exitCode == 0 %}
-        [Code Health] PASSED - orientacion_hv {{ execution.startDate | date("yyyy-MM-dd") }}
-      {% else %}
-        [Code Health] FAILED - orientacion_hv {{ execution.startDate | date("yyyy-MM-dd") }}
-      {% endif %}
+    # Subject uses execution.state (available at notify time) rather than
+    # inputs (this workflow has none) or task-level exitCode (not resolvable
+    # in subject Jinja).
+    subject: "Code Health {% if execution.state == 'SUCCESS' %}PASSED{% else %}FAILED{% endif %} - orientacion_hv {{ execution.startDate | date('yyyy-MM-dd') }}"
     htmlTextContent: |
-      {% set results = outputs.run_code_health_tests.outputFiles['test_results.json'] | json %}
+      {% set results = json(read(outputs.run_code_health_tests.outputFiles['test_results.json'])) %}
 
       <h2>
         {% if results.all_passed %}
-          Code health check passed &mdash; all {{ results.total }} tests green
+          Code health check passed &mdash; all {{ results.total }} tests green ✓
         {% else %}
-          Code health check failed &mdash; {{ results.failed }} of {{ results.total }} tests failed
+          Code health check failed &mdash; {{ results.failed }} of {{ results.total }} tests FAILED ✗
         {% endif %}
       </h2>
 
