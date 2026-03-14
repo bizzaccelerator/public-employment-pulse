@@ -1,0 +1,469 @@
+id: formacion-raw-data-pipeline
+namespace: public_employment_pulse
+
+inputs:
+  - id: data_processed
+    type: SELECT
+    description: Data of interest processed.
+    displayName: "Choose the data of interest."
+    defaults: formacion
+    values: [ registro_hv, orientacion, intermediacion, vacantes, empresas, formacion ]
+
+  - id: year_of_interest
+    type: SELECT
+    description: Year of data to process.
+    displayName: "Choose the year of interest."
+    defaults: "2026"
+    values: [ "2024", "2025", "2026" ]
+
+  - id: month_of_interest
+    type: INT
+    description: Month of data to process.
+    displayName: "Choose the month number of interest."
+    defaults: 1
+
+variables:
+  staging_table: "public.formacion_staging"
+  table:         "public.formacion"
+  file:          "{{ inputs.data_processed }}_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}"
+  month_name: "{% set month_names = {1: 'january', 2: 'february', 3: 'march', 4: 'april', 5: 'may', 6: 'june', 7: 'july', 8: 'august', 9: 'september', 10: 'october', 11: 'november', 12: 'december'} %}{{ month_names[inputs.month_of_interest] }}"
+  month_padded: "{{ '%02d' | format(inputs.month_of_interest) }}"
+
+tasks:
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 1. INGEST & PROCESS
+  #    Single task that:
+  #      a) lists every .xlsx under the GCS prefix
+  #      b) resolves the correct sheet in each file via SHEET_MAP
+  #      c) downloads, normalises, renames, cleans and concatenates them
+  #      d) applies all population flags
+  #      e) writes formacion_<year>_<month>.parquet + record_count.txt
+  # ────────────────────────────────────────────────────────────────────────────
+  - id: ingest_and_process
+    type: io.kestra.plugin.scripts.python.Commands
+    docker:
+      image: python:3.11-slim
+    description: >
+      List, download and concatenate all .xlsx files from the GCS bucket prefix,
+      then clean and transform the combined DataFrame into a single parquet output.
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    namespaceFiles:
+      enabled: true
+      include:
+        - "formacion.py"
+    beforeCommands:
+      - pip install pandas numpy openpyxl gcsfs pyarrow fastparquet google-auth --quiet
+    env:
+      GCS_BUCKET: "operations-raw-data_public-employment-pulse/{{ inputs.data_processed }}"
+      MONTH:      "{{ inputs.month_of_interest }}"
+      YEAR:       "{{ inputs.year_of_interest }}"
+    commands:
+      - python formacion.py
+    outputFiles:
+      - "*.parquet"
+      - "record_count.txt"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 2. DATA QUALITY TESTS
+  # ────────────────────────────────────────────────────────────────────────────
+  - id: run_data_quality_tests
+    type: io.kestra.plugin.scripts.python.Commands
+    docker:
+      image: python:3.11-slim
+    description: "Run pytest unit tests for the formacion transformation logic"
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    namespaceFiles:
+      enabled: true
+      include:
+        - "formacion.py"
+        - "test_formacion.py"
+        - "run_tests_formacion.py"
+    beforeCommands:
+      - pip install pandas numpy openpyxl pyarrow fastparquet pytest pytest-json-report --quiet
+    commands:
+      - python run_tests_formacion.py
+    outputFiles:
+      - "test_results.json"
+      - "test_report.txt"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 3. NOTIFY TEST RESULTS
+  # ────────────────────────────────────────────────────────────────────────────
+  - id: notify_test_results
+    type: io.kestra.plugin.notifications.mail.MailSend
+    allowFailure: true
+    from: "{{ kv('SENDER_EMAIL') }}"
+    to:   "{{ kv('RECIPIENT_EMAILS') }}"
+    subject: >-
+      {% if outputs.run_data_quality_tests.exitCode == 0 %}Tests PASSED
+      {% else %}Tests FAILED{% endif %}
+      — {{ inputs.data_processed }} {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}
+    htmlTextContent: |
+      {% set results = json(read(outputs.run_data_quality_tests.outputFiles['test_results.json'])) %}
+      <h2>
+        {% if results.all_passed %}All {{ results.total }} tests passed
+        {% else %}{{ results.failed }} of {{ results.total }} tests failed{% endif %}
+      </h2>
+      <p>
+        <strong>Pipeline run:</strong> formacion &mdash;
+        {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}<br>
+        <strong>Run at:</strong> {{ results.run_at }}<br>
+        <strong>Total:</strong> {{ results.total }} &nbsp;
+        <strong>Passed:</strong> {{ results.passed }} &nbsp;
+        <strong>Failed:</strong> {{ results.failed }}
+      </p>
+      {% if not results.all_passed %}
+      <h3 style="color:#cc0000;">Failed Tests</h3>
+      <ul>
+        {% for t in results.tests %}{% if not t.passed %}
+        <li>
+          <strong>{{ t.name }}</strong><br>
+          <pre style="font-size:0.85em;background:#f8f8f8;padding:6px;">{{ t.detail }}</pre>
+        </li>
+        {% endif %}{% endfor %}
+      </ul>
+      {% endif %}
+      <p>Full log attached as <code>test_report.txt</code>.</p>
+    attachments:
+      - name: "test_report_{{ inputs.data_processed }}_{{ inputs.month_of_interest }}_{{ inputs.year_of_interest }}.txt"
+        uri:  "{{ outputs.run_data_quality_tests.outputFiles['test_report.txt'] }}"
+        contentType: text/plain
+    host:              "{{ kv('SMTP_SERVER') }}"
+    port:              "{{ kv('SMTP_PORT') }}"
+    username:          "{{ kv('GMAIL_USERNAME') }}"
+    password:          "{{ kv('GMAIL_APP_PASSWORD') }}"
+    transportStrategy: SMTP_TLS
+
+  - id: log_processing_complete
+    type: io.kestra.plugin.core.log.Log
+    message: "formacion files ingested, processed and validated successfully"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 4. CREATE TABLES
+  # ────────────────────────────────────────────────────────────────────────────
+  - id: drop_tables_if_exists
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url:      jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      DROP TABLE IF EXISTS {{ render(vars.staging_table) }} CASCADE;
+      DROP TABLE IF EXISTS {{ render(vars.table) }} CASCADE;
+
+  - id: create_tables
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url:      jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      CREATE TABLE IF NOT EXISTS {{ render(vars.table) }} (
+          id                    SERIAL PRIMARY KEY,
+          -- Identity
+          tipo_de_documento     VARCHAR(100),
+          numero_de_documento   VARCHAR(50),
+          nombres               VARCHAR(255),
+          apellidos             VARCHAR(255),
+          celular               VARCHAR(50),
+          email                 VARCHAR(255),
+          -- Demographics
+          edad                  INTEGER,
+          rango_de_edad         VARCHAR(50),
+          genero                VARCHAR(10),
+          direccion_residencia  VARCHAR(255),
+          localidad             VARCHAR(255),
+          barrio                VARCHAR(255),
+          -- Education & course
+          formacion             VARCHAR(255),
+          curso_inscrito        VARCHAR(255),
+          curso_de_interes      VARCHAR(255),
+          -- Program metadata
+          autorizacion_datos    TEXT,
+          cursos_previos_co     VARCHAR(10),
+          anexo_cedula          TEXT,
+          -- Dates
+          fecha_de_nacimiento   TIMESTAMP,
+          fecha_de_registro     TIMESTAMP,
+          -- Population flags
+          tipo_discapacidad     VARCHAR(255),
+          discapacidad          VARCHAR(100),
+          grupos_etnicos        VARCHAR(100),
+          vca                   VARCHAR(100),
+          migrante              VARCHAR(100),
+          vvg                   VARCHAR(100),
+          reincorporados        VARCHAR(100),
+          -- Pipeline metadata
+          mes                   INTEGER,
+          anio                  INTEGER,
+          filename              VARCHAR(255),
+          unique_row_id         VARCHAR(32),
+          created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS {{ render(vars.staging_table) }} (
+          LIKE {{ render(vars.table) }} INCLUDING ALL
+      );
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 5. LOAD TO STAGING
+  # ────────────────────────────────────────────────────────────────────────────
+  - id: load_data_to_staging
+    type: io.kestra.plugin.scripts.python.Script
+    docker:
+      image: python:3.11-slim
+    beforeCommands:
+      - pip install pandas sqlalchemy psycopg2-binary pyarrow fastparquet --quiet
+    inputFiles:
+      data_file: "{{ outputs.ingest_and_process.outputFiles['formacion_' ~ inputs.year_of_interest ~ '_' ~ inputs.month_of_interest ~ '.parquet'] }}"
+    env:
+      DB_HOST:     "{{ kv('POSTGRES_HOST') }}"
+      DB_PORT:     "{{ kv('POSTGRES_PORT') }}"
+      DB_NAME:     "{{ kv('POSTGRES_DB') }}"
+      DB_USER:     "{{ kv('POSTGRES_USER') }}"
+      DB_PASSWORD: "{{ kv('POSTGRES_PASSWORD') }}"
+    script: |
+      import pandas as pd
+      import numpy as np
+      from sqlalchemy import create_engine
+      import os
+
+      engine = create_engine(
+          f"postgresql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}"
+          f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT','5432')}/{os.getenv('DB_NAME')}"
+      )
+
+      df = pd.read_parquet("data_file")
+      print(f"Parquet loaded: {len(df)} rows | columns: {list(df.columns)}")
+
+      # Map parquet column names → DB column names (accent-safe)
+      column_mapping = {
+          "tipo_de_documento":   "tipo_de_documento",
+          "numero_de_documento": "numero_de_documento",
+          "nombres":             "nombres",
+          "apellidos":           "apellidos",
+          "celular":             "celular",
+          "email":               "email",
+          "edad":                "edad",
+          "rango_de_edad":       "rango_de_edad",
+          "género":              "genero",
+          "direccion_residencia":"direccion_residencia",
+          "localidad":           "localidad",
+          "barrio":              "barrio",
+          "formacion":           "formacion",
+          "curso_inscrito":      "curso_inscrito",
+          "curso_de_interes":    "curso_de_interes",
+          "autorizacion_datos":  "autorizacion_datos",
+          "cursos_previos_co":   "cursos_previos_co",
+          "anexo_cedula":        "anexo_cedula",
+          "fecha_de_nacimiento": "fecha_de_nacimiento",
+          "fecha_de_registro":   "fecha_de_registro",
+          "tipo_discapacidad":   "tipo_discapacidad",
+          "discapacidad":        "discapacidad",
+          "grupos_etnicos":      "grupos_etnicos",
+          "vca":                 "vca",
+          "migrante":            "migrante",
+          "vvg":                 "vvg",
+          "reincorporados":      "reincorporados",
+          "mes":                 "mes",
+          "anio":                "anio",
+      }
+      df = df.rename(columns=column_mapping)
+
+      for col in ["fecha_de_nacimiento", "fecha_de_registro"]:
+          if col in df.columns:
+              df[col] = pd.to_datetime(df[col], errors="coerce")
+
+      for col in ["edad", "mes", "anio"]:
+          if col in df.columns:
+              df[col] = pd.to_numeric(df[col], errors="coerce")
+
+      # Unwrap any accidental list/array cells
+      for col in df.columns:
+          if df[col].dtype == "object":
+              if df[col].apply(lambda x: isinstance(x, (list, np.ndarray))).any():
+                  df[col] = df[col].apply(
+                      lambda x: str(x) if isinstance(x, (list, np.ndarray)) else x
+                  )
+
+      df = df.replace({np.nan: None})
+      db_cols = list(column_mapping.values())
+      df = df[[c for c in db_cols if c in df.columns]]
+
+      df.to_sql(
+          "formacion_staging", engine,
+          if_exists="append", index=False,
+          method="multi", chunksize=1000,
+      )
+      print(f"Loaded {len(df)} rows → formacion_staging")
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 6. ENRICH STAGING  (unique_row_id + filename)
+  # ────────────────────────────────────────────────────────────────────────────
+  - id: add_unique_id_and_filename
+    type: io.kestra.plugin.jdbc.postgresql.Queries
+    url:      jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      UPDATE {{ render(vars.staging_table) }}
+      SET
+        unique_row_id = md5(
+          COALESCE(tipo_de_documento,   '') ||
+          COALESCE(numero_de_documento, '') ||
+          COALESCE(nombres,             '') ||
+          COALESCE(apellidos,           '') ||
+          COALESCE(fecha_de_registro::text, '') ||
+          COALESCE(mes::text,           '')
+        ),
+        filename = '{{ render(vars.file) }}';
+
+  - id: log_staging_complete
+    type: io.kestra.plugin.core.log.Log
+    message: "formacion_staging loaded and enriched"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 7. MERGE INTO MAIN TABLE
+  # ────────────────────────────────────────────────────────────────────────────
+  - id: formacion_merge_data
+    type: io.kestra.plugin.jdbc.postgresql.Queries
+    url:      jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      MERGE INTO {{ render(vars.table) }} AS T
+      USING {{ render(vars.staging_table) }} AS S
+        ON T.unique_row_id = S.unique_row_id
+      WHEN NOT MATCHED THEN
+        INSERT (
+          unique_row_id, filename,
+          tipo_de_documento, numero_de_documento, nombres, apellidos,
+          celular, email, edad, rango_de_edad, genero,
+          direccion_residencia, localidad, barrio,
+          formacion, curso_inscrito, curso_de_interes,
+          autorizacion_datos, cursos_previos_co, anexo_cedula,
+          fecha_de_nacimiento, fecha_de_registro,
+          tipo_discapacidad, discapacidad, grupos_etnicos,
+          vca, migrante, vvg, reincorporados,
+          mes, anio, created_at
+        )
+        VALUES (
+          S.unique_row_id, S.filename,
+          S.tipo_de_documento, S.numero_de_documento, S.nombres, S.apellidos,
+          S.celular, S.email, S.edad, S.rango_de_edad, S.genero,
+          S.direccion_residencia, S.localidad, S.barrio,
+          S.formacion, S.curso_inscrito, S.curso_de_interes,
+          S.autorizacion_datos, S.cursos_previos_co, S.anexo_cedula,
+          S.fecha_de_nacimiento, S.fecha_de_registro,
+          S.tipo_discapacidad, S.discapacidad, S.grupos_etnicos,
+          S.vca, S.migrante, S.vvg, S.reincorporados,
+          S.mes, S.anio, S.created_at
+        );
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 8. INCOMPLETE DATA REPORT
+  # ────────────────────────────────────────────────────────────────────────────
+  - id: identify_incomplete_data
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url:      jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      SELECT
+        unique_row_id,
+        numero_de_documento,
+        nombres,
+        apellidos,
+        CASE
+          WHEN edad IS NULL AND genero IS NULL THEN 'edad y genero'
+          WHEN edad IS NULL                    THEN 'edad'
+          WHEN genero IS NULL                  THEN 'genero'
+        END AS missing_field
+      FROM {{ render(vars.staging_table) }}
+      WHERE edad IS NULL OR genero IS NULL;
+    fetchType: STORE
+
+  - id: convert_incomplete_to_csv
+    type: "io.kestra.plugin.serdes.csv.IonToCsv"
+    from: "{{ outputs.identify_incomplete_data.uri }}"
+
+  - id: send_incomplete_data_report
+    type: io.kestra.plugin.notifications.mail.MailSend
+    from: "{{ kv('SENDER_EMAIL') }}"
+    to:   "{{ kv('RECIPIENT_EMAILS') }}"
+    subject: "Incomplete Data Report — Formacion {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}"
+    htmlTextContent: |
+      <h2>Incomplete Data Report — Formacion</h2>
+      <p>
+        Report for <strong>{{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}</strong>.<br>
+        <strong>Total records processed:</strong>
+        {{ read(outputs.ingest_and_process.outputFiles['record_count.txt']) }}<br>
+        <strong>Records missing edad or genero:</strong>
+        {{ outputs.identify_incomplete_data.size }}
+      </p>
+      <p>Please review the attached CSV and take appropriate action.</p>
+    attachments:
+      - name: "incomplete_formacion_{{ inputs.month_of_interest }}_{{ inputs.year_of_interest }}.csv"
+        uri:  "{{ outputs.convert_incomplete_to_csv.uri }}"
+        contentType: text/csv
+    host:              "{{ kv('SMTP_SERVER') }}"
+    port:              "{{ kv('SMTP_PORT') }}"
+    username:          "{{ kv('GMAIL_USERNAME') }}"
+    password:          "{{ kv('GMAIL_APP_PASSWORD') }}"
+    transportStrategy: SMTP_TLS
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 9. EXPORT TO GCS
+  # ────────────────────────────────────────────────────────────────────────────
+  - id: query_data_to_upload
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url:      jdbc:postgresql://{{ kv('POSTGRES_HOST') }}:{{ kv('POSTGRES_PORT') }}/{{ kv('POSTGRES_DB') }}
+    username: "{{ kv('POSTGRES_USER') }}"
+    password: "{{ kv('POSTGRES_PASSWORD') }}"
+    sql: |
+      SELECT
+        COALESCE(unique_row_id,        '0')           AS unique_row_id,
+        COALESCE(tipo_de_documento,    '')             AS tipo_de_documento,
+        COALESCE(numero_de_documento,  '')             AS numero_de_documento,
+        COALESCE(nombres,              '')             AS nombres,
+        COALESCE(apellidos,            '')             AS apellidos,
+        COALESCE(celular,              '')             AS celular,
+        COALESCE(email,                '')             AS email,
+        COALESCE(edad,                  0)             AS edad,
+        COALESCE(rango_de_edad,        '')             AS rango_de_edad,
+        COALESCE(genero,               '')             AS genero,
+        COALESCE(direccion_residencia, '')             AS direccion_residencia,
+        COALESCE(localidad,            '')             AS localidad,
+        COALESCE(barrio,               '')             AS barrio,
+        COALESCE(formacion,            '')             AS formacion,
+        COALESCE(curso_inscrito,       '')             AS curso_inscrito,
+        COALESCE(curso_de_interes,     '')             AS curso_de_interes,
+        COALESCE(autorizacion_datos,   '')             AS autorizacion_datos,
+        COALESCE(cursos_previos_co,    '')             AS cursos_previos_co,
+        COALESCE(fecha_de_nacimiento::TIMESTAMP, '1970-01-01') AS fecha_de_nacimiento,
+        COALESCE(fecha_de_registro::TIMESTAMP,   '1970-01-01') AS fecha_de_registro,
+        COALESCE(tipo_discapacidad,    '')             AS tipo_discapacidad,
+        COALESCE(discapacidad,         '')             AS discapacidad,
+        COALESCE(grupos_etnicos,       '')             AS grupos_etnicos,
+        COALESCE(vca,                  '')             AS vca,
+        COALESCE(migrante,             '')             AS migrante,
+        COALESCE(vvg,                  '')             AS vvg,
+        COALESCE(reincorporados,       '')             AS reincorporados,
+        COALESCE(mes,                   0)             AS mes,
+        COALESCE(anio,                  0)             AS anio,
+        COALESCE(filename,             '')             AS filename,
+        COALESCE(created_at::TIMESTAMP, '1970-01-01') AS created_at
+      FROM {{ render(vars.table) }}
+      WHERE mes  <= {{ inputs.month_of_interest }}
+        AND anio <= {{ inputs.year_of_interest }};
+    fetchType: STORE
+
+  - id: convert_monthly_data_to_parquet
+    type: io.kestra.plugin.serdes.parquet.IonToParquet
+    from: "{{ outputs.query_data_to_upload.uri }}"
+
+  - id: upload_monthly_data_to_gcs
+    type: io.kestra.plugin.gcp.gcs.Upload
+    from: "{{ outputs.convert_monthly_data_to_parquet.uri }}"
+    to: "gs://employment-agency-operational-data/{{ inputs.data_processed }}/{{ inputs.year_of_interest }}/{{ vars.month_name }}/formacion_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}.parquet"
