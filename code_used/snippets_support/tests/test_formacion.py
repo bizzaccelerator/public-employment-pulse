@@ -21,7 +21,7 @@ import pandas as pd
 import numpy as np
 from unittest.mock import MagicMock, patch, call
 
-from formacion import (
+from code_used.snippets_support.workload.formacion import (
     resolve_sheet,
     ingest_from_gcs,
     normalize_column_names,
