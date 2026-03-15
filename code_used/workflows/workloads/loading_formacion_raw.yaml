@@ -26,19 +26,19 @@ variables:
   staging_table: "public.formacion_staging"
   table:         "public.formacion"
   file:          "{{ inputs.data_processed }}_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}"
-  month_name: "{% set month_names = {1: 'january', 2: 'february', 3: 'march', 4: 'april', 5: 'may', 6: 'june', 7: 'july', 8: 'august', 9: 'september', 10: 'october', 11: 'november', 12: 'december'} %}{{ month_names[inputs.month_of_interest] }}"
-  month_padded: "{{ '%02d' | format(inputs.month_of_interest) }}"
+  month_name:    "{% set month_names = {1: 'january', 2: 'february', 3: 'march', 4: 'april', 5: 'may', 6: 'june', 7: 'july', 8: 'august', 9: 'september', 10: 'october', 11: 'november', 12: 'december'} %}{{ month_names[inputs.month_of_interest] }}"
+  month_padded:  "{{ '%02d' | format(inputs.month_of_interest) }}"
 
 tasks:
 
   # ────────────────────────────────────────────────────────────────────────────
   # 1. INGEST & PROCESS
-  #    Single task that:
-  #      a) lists every .xlsx under the GCS prefix
-  #      b) resolves the correct sheet in each file via SHEET_MAP
-  #      c) downloads, normalises, renames, cleans and concatenates them
-  #      d) applies all population flags
-  #      e) writes formacion_<year>_<month>.parquet + record_count.txt
+  #    a) Lists every .xlsx under the GCS prefix (driven by data_processed)
+  #    b) Resolves the correct sheet per file via SHEET_MAP
+  #    c) Downloads, normalises, renames, cleans and concatenates them
+  #    d) Drops null-identity rows via filter_valid_records
+  #    e) Applies all population flags
+  #    f) Writes <data_processed>_<year>_<month>.parquet + record_count.txt
   # ────────────────────────────────────────────────────────────────────────────
   - id: ingest_and_process
     type: io.kestra.plugin.scripts.python.Commands
@@ -46,7 +46,7 @@ tasks:
       image: python:3.11-slim
     description: >
       List, download and concatenate all .xlsx files from the GCS bucket prefix,
-      then clean and transform the combined DataFrame into a single parquet output.
+      then clean, validate and transform the combined DataFrame into a single parquet.
     taskRunner:
       type: io.kestra.plugin.core.runner.Process
     namespaceFiles:
@@ -56,9 +56,10 @@ tasks:
     beforeCommands:
       - pip install pandas numpy openpyxl gcsfs pyarrow fastparquet google-auth --quiet
     env:
-      GCS_BUCKET: "operations-raw-data_public-employment-pulse/{{ inputs.data_processed }}"
-      MONTH:      "{{ inputs.month_of_interest }}"
-      YEAR:       "{{ inputs.year_of_interest }}"
+      GCS_BUCKET:     "operations-raw-data_public-employment-pulse/{{ inputs.data_processed }}"
+      MONTH:          "{{ inputs.month_of_interest }}"
+      YEAR:           "{{ inputs.year_of_interest }}"
+      DATA_PROCESSED: "{{ inputs.data_processed }}"
     commands:
       - python formacion.py
     outputFiles:
@@ -97,10 +98,7 @@ tasks:
     allowFailure: true
     from: "{{ kv('SENDER_EMAIL') }}"
     to:   "{{ kv('RECIPIENT_EMAILS') }}"
-    subject: >-
-      {% if outputs.run_data_quality_tests.exitCode == 0 %}Tests PASSED
-      {% else %}Tests FAILED{% endif %}
-      — {{ inputs.data_processed }} {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}
+    subject: "{% if outputs.run_data_quality_tests.exitCode == 0 %}Tests PASSED{% else %}Tests FAILED{% endif %} — {{ inputs.data_processed }} {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}"
     htmlTextContent: |
       {% set results = json(read(outputs.run_data_quality_tests.outputFiles['test_results.json'])) %}
       <h2>
@@ -108,7 +106,7 @@ tasks:
         {% else %}{{ results.failed }} of {{ results.total }} tests failed{% endif %}
       </h2>
       <p>
-        <strong>Pipeline run:</strong> formacion &mdash;
+        <strong>Pipeline run:</strong> {{ inputs.data_processed }} &mdash;
         {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}<br>
         <strong>Run at:</strong> {{ results.run_at }}<br>
         <strong>Total:</strong> {{ results.total }} &nbsp;
@@ -139,7 +137,7 @@ tasks:
 
   - id: log_processing_complete
     type: io.kestra.plugin.core.log.Log
-    message: "formacion files ingested, processed and validated successfully"
+    message: "{{ inputs.data_processed }} files ingested, processed and validated successfully"
 
   # ────────────────────────────────────────────────────────────────────────────
   # 4. CREATE TABLES
@@ -165,20 +163,18 @@ tasks:
           tipo_de_documento     VARCHAR(100),
           numero_de_documento   VARCHAR(50),
           nombres               VARCHAR(255),
-          apellidos             VARCHAR(255),
           celular               VARCHAR(50),
+          telefono              VARCHAR(50),
           email                 VARCHAR(255),
           -- Demographics
           edad                  INTEGER,
           rango_de_edad         VARCHAR(50),
           genero                VARCHAR(10),
           direccion_residencia  VARCHAR(255),
-          localidad             VARCHAR(255),
           barrio                VARCHAR(255),
           -- Education & course
           formacion             VARCHAR(255),
           curso_inscrito        VARCHAR(255),
-          curso_de_interes      VARCHAR(255),
           -- Program metadata
           autorizacion_datos    TEXT,
           cursos_previos_co     VARCHAR(10),
@@ -216,7 +212,7 @@ tasks:
     beforeCommands:
       - pip install pandas sqlalchemy psycopg2-binary pyarrow fastparquet --quiet
     inputFiles:
-      data_file: "{{ outputs.ingest_and_process.outputFiles['formacion_' ~ inputs.year_of_interest ~ '_' ~ inputs.month_of_interest ~ '.parquet'] }}"
+      data_file: "{{ outputs.ingest_and_process.outputFiles[inputs.data_processed ~ '_' ~ inputs.year_of_interest ~ '_' ~ inputs.month_of_interest ~ '.parquet'] }}"
     env:
       DB_HOST:     "{{ kv('POSTGRES_HOST') }}"
       DB_PORT:     "{{ kv('POSTGRES_PORT') }}"
@@ -237,28 +233,37 @@ tasks:
       df = pd.read_parquet("data_file")
       print(f"Parquet loaded: {len(df)} rows | columns: {list(df.columns)}")
 
-      # Map parquet column names → DB column names (accent-safe)
+      # Map parquet column names → DB column names.
+      # formacion.py RENAME_DICT already cleaned most accents; the remaining
+      # accented columns ("género", "tipo_de_población") are renamed here
+      # because they must stay accented during Python transforms and are only
+      # stripped at load time.
+      # "telefono" is produced by RENAME_DICT (from "teléfono") — included.
       column_mapping = {
+          # Identity (clean names produced by RENAME_DICT)
           "tipo_de_documento":   "tipo_de_documento",
           "numero_de_documento": "numero_de_documento",
           "nombres":             "nombres",
-          "apellidos":           "apellidos",
           "celular":             "celular",
+          "telefono":            "telefono",
           "email":               "email",
+          # Demographics
           "edad":                "edad",
           "rango_de_edad":       "rango_de_edad",
-          "género":              "genero",
-          "direccion_residencia":"direccion_residencia",
-          "localidad":           "localidad",
+          "género":              "genero",        
           "barrio":              "barrio",
+          "direccion_residencia":"direccion_residencia",
+          # Education & course
           "formacion":           "formacion",
           "curso_inscrito":      "curso_inscrito",
-          "curso_de_interes":    "curso_de_interes",
+          # Program metadata
           "autorizacion_datos":  "autorizacion_datos",
           "cursos_previos_co":   "cursos_previos_co",
           "anexo_cedula":        "anexo_cedula",
+          # Dates
           "fecha_de_nacimiento": "fecha_de_nacimiento",
           "fecha_de_registro":   "fecha_de_registro",
+          # Population flags
           "tipo_discapacidad":   "tipo_discapacidad",
           "discapacidad":        "discapacidad",
           "grupos_etnicos":      "grupos_etnicos",
@@ -266,6 +271,7 @@ tasks:
           "migrante":            "migrante",
           "vvg":                 "vvg",
           "reincorporados":      "reincorporados",
+          # Pipeline metadata
           "mes":                 "mes",
           "anio":                "anio",
       }
@@ -287,7 +293,11 @@ tasks:
                       lambda x: str(x) if isinstance(x, (list, np.ndarray)) else x
                   )
 
+      # pd.NA → None for proper SQL NULL insertion
+      for col in df.select_dtypes(include="object").columns:
+          df[col] = df[col].where(df[col].notna(), other=None)
       df = df.replace({np.nan: None})
+
       db_cols = list(column_mapping.values())
       df = df[[c for c in db_cols if c in df.columns]]
 
@@ -313,7 +323,6 @@ tasks:
           COALESCE(tipo_de_documento,   '') ||
           COALESCE(numero_de_documento, '') ||
           COALESCE(nombres,             '') ||
-          COALESCE(apellidos,           '') ||
           COALESCE(fecha_de_registro::text, '') ||
           COALESCE(mes::text,           '')
         ),
@@ -338,10 +347,10 @@ tasks:
       WHEN NOT MATCHED THEN
         INSERT (
           unique_row_id, filename,
-          tipo_de_documento, numero_de_documento, nombres, apellidos,
-          celular, email, edad, rango_de_edad, genero,
-          direccion_residencia, localidad, barrio,
-          formacion, curso_inscrito, curso_de_interes,
+          tipo_de_documento, numero_de_documento, nombres, 
+          celular, telefono, email, edad, rango_de_edad, genero,
+          direccion_residencia, barrio,
+          formacion, curso_inscrito,
           autorizacion_datos, cursos_previos_co, anexo_cedula,
           fecha_de_nacimiento, fecha_de_registro,
           tipo_discapacidad, discapacidad, grupos_etnicos,
@@ -350,10 +359,10 @@ tasks:
         )
         VALUES (
           S.unique_row_id, S.filename,
-          S.tipo_de_documento, S.numero_de_documento, S.nombres, S.apellidos,
-          S.celular, S.email, S.edad, S.rango_de_edad, S.genero,
-          S.direccion_residencia, S.localidad, S.barrio,
-          S.formacion, S.curso_inscrito, S.curso_de_interes,
+          S.tipo_de_documento, S.numero_de_documento, S.nombres, 
+          S.celular, S.telefono, S.email, S.edad, S.rango_de_edad, S.genero,
+          S.direccion_residencia, S.barrio,
+          S.formacion, S.curso_inscrito,
           S.autorizacion_datos, S.cursos_previos_co, S.anexo_cedula,
           S.fecha_de_nacimiento, S.fecha_de_registro,
           S.tipo_discapacidad, S.discapacidad, S.grupos_etnicos,
@@ -374,7 +383,6 @@ tasks:
         unique_row_id,
         numero_de_documento,
         nombres,
-        apellidos,
         CASE
           WHEN edad IS NULL AND genero IS NULL THEN 'edad y genero'
           WHEN edad IS NULL                    THEN 'edad'
@@ -392,9 +400,9 @@ tasks:
     type: io.kestra.plugin.notifications.mail.MailSend
     from: "{{ kv('SENDER_EMAIL') }}"
     to:   "{{ kv('RECIPIENT_EMAILS') }}"
-    subject: "Incomplete Data Report — Formacion {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}"
+    subject: "Incomplete Data Report — {{ inputs.data_processed }} {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}"
     htmlTextContent: |
-      <h2>Incomplete Data Report — Formacion</h2>
+      <h2>Incomplete Data Report — {{ inputs.data_processed }}</h2>
       <p>
         Report for <strong>{{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}</strong>.<br>
         <strong>Total records processed:</strong>
@@ -404,7 +412,7 @@ tasks:
       </p>
       <p>Please review the attached CSV and take appropriate action.</p>
     attachments:
-      - name: "incomplete_formacion_{{ inputs.month_of_interest }}_{{ inputs.year_of_interest }}.csv"
+      - name: "incomplete_{{ inputs.data_processed }}_{{ inputs.month_of_interest }}_{{ inputs.year_of_interest }}.csv"
         uri:  "{{ outputs.convert_incomplete_to_csv.uri }}"
         contentType: text/csv
     host:              "{{ kv('SMTP_SERVER') }}"
@@ -427,24 +435,23 @@ tasks:
         COALESCE(tipo_de_documento,    '')             AS tipo_de_documento,
         COALESCE(numero_de_documento,  '')             AS numero_de_documento,
         COALESCE(nombres,              '')             AS nombres,
-        COALESCE(apellidos,            '')             AS apellidos,
         COALESCE(celular,              '')             AS celular,
+        COALESCE(telefono,             '')             AS telefono,
         COALESCE(email,                '')             AS email,
         COALESCE(edad,                  0)             AS edad,
         COALESCE(rango_de_edad,        '')             AS rango_de_edad,
         COALESCE(genero,               '')             AS genero,
         COALESCE(direccion_residencia, '')             AS direccion_residencia,
-        COALESCE(localidad,            '')             AS localidad,
         COALESCE(barrio,               '')             AS barrio,
         COALESCE(formacion,            '')             AS formacion,
         COALESCE(curso_inscrito,       '')             AS curso_inscrito,
-        COALESCE(curso_de_interes,     '')             AS curso_de_interes,
         COALESCE(autorizacion_datos,   '')             AS autorizacion_datos,
         COALESCE(cursos_previos_co,    '')             AS cursos_previos_co,
         COALESCE(fecha_de_nacimiento::TIMESTAMP, '1970-01-01') AS fecha_de_nacimiento,
         COALESCE(fecha_de_registro::TIMESTAMP,   '1970-01-01') AS fecha_de_registro,
         COALESCE(tipo_discapacidad,    '')             AS tipo_discapacidad,
         COALESCE(discapacidad,         '')             AS discapacidad,
+        COALESCE(anexo_cedula,         '')             AS anexo_cedula,
         COALESCE(grupos_etnicos,       '')             AS grupos_etnicos,
         COALESCE(vca,                  '')             AS vca,
         COALESCE(migrante,             '')             AS migrante,
@@ -455,8 +462,8 @@ tasks:
         COALESCE(filename,             '')             AS filename,
         COALESCE(created_at::TIMESTAMP, '1970-01-01') AS created_at
       FROM {{ render(vars.table) }}
-      WHERE mes  <= {{ inputs.month_of_interest }}
-        AND anio <= {{ inputs.year_of_interest }};
+      WHERE mes  = {{ inputs.month_of_interest }}
+        AND anio = {{ inputs.year_of_interest }};
     fetchType: STORE
 
   - id: convert_monthly_data_to_parquet
@@ -466,4 +473,4 @@ tasks:
   - id: upload_monthly_data_to_gcs
     type: io.kestra.plugin.gcp.gcs.Upload
     from: "{{ outputs.convert_monthly_data_to_parquet.uri }}"
-    to: "gs://employment-agency-operational-data/{{ inputs.data_processed }}/{{ inputs.year_of_interest }}/{{ vars.month_name }}/formacion_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}.parquet"
+    to: "gs://employment-agency-operational-data/{{ inputs.data_processed }}/{{ inputs.year_of_interest }}/{{ vars.month_name }}/{{ inputs.data_processed }}_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}.parquet"

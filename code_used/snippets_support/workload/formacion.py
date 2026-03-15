@@ -14,16 +14,20 @@ Reads two env vars injected by Kestra:
 Pipeline steps
 --------------
 1. ingest_from_gcs()      List the bucket prefix, detect the sheet in each
-                          file, download + concat into a single raw DataFrame.
+                          file, download + concat into a single raw DataFrame,
+                          then restrict to the 27 columns in SELECT_COLUMNS.
 2. normalize_column_names()  Clean column headers.
 3. rename with RENAME_DICT   Map long/special column names to short keys.
-4. cast_datetime_columns()   Parse date columns.
-5. clean_edad()              Extract numeric age, derive rango_de_edad.
-6. lowercase_string_columns() Lowercase all object columns.
-7. clean_genero()            Map full gender labels to single characters.
-8. add_population_flags()    Derive VVG, VCA, migrante, étnico, discapacidad,
+                             Note: "indique_el_curso_al_que_desea_inscribirse" (no
+                             trailing underscore) maps to "curso_inscrito" only.
+4. filter_valid_records()    Drop rows missing numero_de_documento or nombres.
+5. cast_datetime_columns()   Parse date columns.
+6. clean_edad()              Extract numeric age, derive rango_de_edad.
+7. lowercase_string_columns() Lowercase all object columns.
+8. clean_genero()            Map full gender labels to single characters.
+9. add_population_flags()    Derive VVG, VCA, migrante, étnico, discapacidad,
                              reincorporados columns.
-9. Write output parquet + record_count.txt for Kestra to consume.
+10. Write output parquet + record_count.txt for Kestra to consume.
 """
 
 import os
@@ -34,8 +38,7 @@ import gcsfs
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-# Sheet-name lookup: maps a substring of the Excel filename (lowercase)
-# to the sheet name inside that file.
+# Sheet-name lookup: maps a substring of the Excel filename (lowercase) to the sheet name inside that file.
 # Add new entries here whenever a new course file is onboarded.
 SHEET_MAP: dict[str, str] = {
     "atencion al cliente":  "Matriculados ATENCION MEDIOS DI",
@@ -46,16 +49,57 @@ SHEET_MAP: dict[str, str] = {
 DEFAULT_SHEET_INDEX = 0
 
 RENAME_DICT: dict[str, str] = {
+    # ── Long / special-character headers ─────────────────────────────────────
     "para_prestarte_un_mejor_servicio_y_cumplir_nuestras_funciones,_la_alcaldía_distrital_de_barranquilla_tratará_tus_datos_personales_conforme_a_la_ley_1581_de_2012._conoce_tus_derechos_y_cómo_ejercerlos_en_nuestra_política_de_tratamiento_de_datos_en": "autorizacion_datos",
     "¿ha_realizado_cursos_en_el_centro_de_oportunidades?": "cursos_previos_co",
     "dirección_de_residencia:_(ejemplo:_k_10_47b_133_ó_c_23_20_30)": "direccion_residencia",
     "correo_electrónico_@": "email",
     "último_nivel_de_estudio_aprobado": "formacion",
     "¿tiene_alguna_discapacidad?": "tipo_discapacidad",
-    "indique_el_curso_al_que_desea_inscribirse_": "curso_de_interes",
     "adjunte_fotocopia_de_su_cédula": "anexo_cedula",
     "indique_el_curso_al_que_desea_inscribirse": "curso_inscrito",
+    # ── Accented identity columns → clean unaccented DB names ────────────────
+    # normalize_column_names preserves accents; map them here so the parquet
+    # always lands with the exact names the DB schema and column_mapping expect.
+    # NOTE: "género" and "tipo_de_población" are intentionally NOT renamed here
+    # because clean_genero() and flag_population() reference them by their
+    # accented names. They are stripped of accents at the DB loading step.
+    "número_de_documento":  "numero_de_documento",
+    "número_documento":     "numero_de_documento",   # alternate header spelling
+    "nombre_completo":      "nombres",               
+    "teléfono":             "telefono",
 }
+
+# Exact set of columns to keep after normalize_column_names + RENAME_DICT.
+SELECT_COLUMNS: list[str] = [
+    "adjudicado",
+    "autorizacion_datos",         # renamed from long privacy-policy header
+    "fecha_de_registro",
+    "nombres",                    # renamed from "nombre_completo"
+    "tipo_de_documento",
+    "numero_de_documento",        # renamed from "número_de_documento"
+    "asistencia",
+    "telefono",                   # renamed from "teléfono"
+    "cursos_previos_co",          # renamed from "¿ha_realizado_cursos_en_...?"
+    "sise",
+    "país_de_nacimiento",
+    "departamento_de_nacimiento",
+    "ciudad_de_nacimiento",
+    "fecha_de_nacimiento",
+    "edad",
+    "género",
+    "direccion_residencia",       # renamed from "dirección_de_residencia:_..."
+    "barrio",
+    "municipio_de_residencia",
+    "email",                      # renamed from "correo_electrónico_@"
+    "celular",
+    "celular_adicional",
+    "formacion",                  # renamed from "último_nivel_de_estudio_aprobado"
+    "tipo_de_población",
+    "tipo_discapacidad",          # renamed from "¿tiene_alguna_discapacidad?"
+    "curso_inscrito",             # renamed from "indique_el_curso_al_que_desea_inscribirse"
+    "anexo_cedula",               # renamed from "adjunte_fotocopia_de_su_cédula"
+]
 
 DATETIME_COLUMNS: list[str] = ["fecha_de_nacimiento", "fecha_de_registro"]
 
@@ -66,7 +110,6 @@ GENERO_MAPPING: dict[str, str] = {
 }
 
 # Ordered dict: specific patterns first so they win over the catch-all
-# 'capacidad' entry at the end.
 DISCAPACIDAD_PATTERNS: dict[str, str] = {
     r"ognitiv|telect":  "Cognitiva o Intelectual",
     r"[ií]sic":         "Física",
@@ -75,7 +118,7 @@ DISCAPACIDAD_PATTERNS: dict[str, str] = {
     r"múltiple":        "Múltiple",
     r"sordoceguera":    "Sordoceguera",
     r"psicosocial":     "Psicosocial",
-    r"capacidad":       "Discapacidad",   # catch-all — must remain last
+    r"capacidad":       "Discapacidad",   
 }
 
 
@@ -191,7 +234,7 @@ def ingest_from_gcs(
         column_sets.append(set(df.columns))
         print(f"    ✓ {filename:55s} → sheet: '{sheet_name}' | rows: {len(df)}")
 
-    # 3. Intersect column sets (excluding the internal traceability column) ──
+    # 3. Verify at least one common column exists as a sanity check ──────────
     data_col_sets = [cs - {"_source_file"} for cs in column_sets]
     common_columns = list(data_col_sets[0].intersection(*data_col_sets[1:]))
 
@@ -201,18 +244,29 @@ def ingest_from_gcs(
             f"gs://{bucket_prefix}. Check RENAME_DICT and sheet contents."
         )
 
+    all_columns = sorted(
+        set().union(*data_col_sets),
+        key=lambda c: (c not in common_columns, c)
+    )
     print(f"\n  Common columns ({len(common_columns)}): {sorted(common_columns)}")
+    print(f"  Total columns after outer join ({len(all_columns)}): {all_columns}")
 
-    # 4. Concatenate keeping common columns + source traceability ────────────
+    # 4. Outer concat: keep ALL columns from all files, NaN-fill missing ones.
     combined = pd.concat(
-        [df[common_columns + ["_source_file"]] for df in dataframes],
+        dataframes,
+        join="outer",
         ignore_index=True,
     )
-    print(f"  Combined DataFrame: {len(combined)} rows × {len(common_columns)} columns\n")
-
-    # Drop internal traceability column before returning — callers should not
-    # depend on it; run_pipeline re-drops defensively for safety.
     combined = combined.drop(columns=["_source_file"])
+
+    # 5. Restrict to the declared column set. Any column not in SELECT_COLUMNS is silently dropped so that noise
+    cols_to_keep = [c for c in SELECT_COLUMNS if c in combined.columns]
+    missing = [c for c in SELECT_COLUMNS if c not in combined.columns]
+    if missing:
+        print(f"  ⚠  Columns declared in SELECT_COLUMNS but absent from files: {missing}")
+    combined = combined[cols_to_keep]
+
+    print(f"  Combined DataFrame: {len(combined)} rows × {len(combined.columns)} columns\n")
     return combined
 
 
@@ -230,9 +284,9 @@ def clean_edad(df: pd.DataFrame) -> pd.DataFrame:
     """Extract numeric age and append a rango_de_edad bucket column."""
     df["edad"] = (
         df["edad"].astype(str)
-        .str.extract(r"(\d+)")   # always returns a DataFrame
-        .iloc[:, 0]              # grab the single capture group as a Series
-        .astype("Int64")         # safe on any row count, NaN-safe
+        .str.extract(r"(\d+)")   
+        .iloc[:, 0]              
+        .astype("Int64")         
     )
     df["rango_de_edad"] = df["edad"].apply(
         lambda x: classify_age(x) if pd.notna(x) else np.nan
@@ -252,6 +306,40 @@ def clean_genero(df: pd.DataFrame, mapping: dict[str, str]) -> pd.DataFrame:
     if "género" in df.columns:
         df["género"] = df["género"].str.lower().replace(mapping)
     return df
+
+
+def filter_valid_records(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Split *df* into valid and invalid partitions.
+
+    A record is invalid when any of the mandatory identity columns is null
+    or contains only whitespace after string normalisation.  These rows
+    carry no usable information and must never reach the database.
+
+    Returns:
+        (valid, invalid) — two DataFrames whose lengths sum to len(df).
+    """
+    
+    REQUIRED = ["numero_de_documento", "nombres"]
+
+    # Only check columns that actually exist in this DataFrame
+    cols_to_check = [c for c in REQUIRED if c in df.columns]
+
+    # Build a mask: True where the row is missing at least one required field.
+    invalid_mask = pd.Series(False, index=df.index)
+    for col in cols_to_check:
+        is_null  = df[col].isna()
+        is_blank = df[col].astype(str).str.strip().eq("")
+        invalid_mask |= is_null | is_blank
+
+    valid   = df[~invalid_mask].reset_index(drop=True)
+    invalid = df[invalid_mask].reset_index(drop=True)
+
+    if len(invalid) > 0:
+        print(f"  ⚠  Dropped {len(invalid)} invalid row(s) "
+              f"(null/blank in: {cols_to_check})")
+
+    return valid, invalid
 
 
 # ── Population flags ──────────────────────────────────────────────────────────
@@ -305,8 +393,7 @@ def flag_discapacidad(
     Patterns are evaluated in insertion order; the first match wins,
     so specific patterns must precede the catch-all in *patterns*.
     """
-    # Initialise as object dtype so string assignment never hits the
-    # "incompatible dtype" FutureWarning raised when starting from float64.
+
     df["discapacidad"] = pd.array([pd.NA] * len(df), dtype=object)
     for pattern, label in patterns.items():
         mask = (
@@ -326,7 +413,7 @@ def add_population_flags(df: pd.DataFrame) -> pd.DataFrame:
         df, "grupos_etnicos",
         ["narp (negro, afrocolombiano, raizal o palenquero)"],
         "Grupos etnicos",
-        regex=False,   # literal parens in the NARP label — not a regex
+        regex=False,
     )
     df = flag_population(
         df, "migrante", ["migr", "retor"], "Migrante o Retornado",
@@ -356,6 +443,9 @@ def run_pipeline(
     # ── Ingest ────────────────────────────────────────────────────────────
     inscritos = ingest_from_gcs(bucket_prefix, fs, RENAME_DICT)
 
+    # ── Validate ──────────────────────────────────────────────────────────
+    inscritos, _ = filter_valid_records(inscritos)
+
     # ── Transform ─────────────────────────────────────────────────────────
     inscritos = cast_datetime_columns(inscritos, DATETIME_COLUMNS)
     inscritos = clean_edad(inscritos)
@@ -367,8 +457,7 @@ def run_pipeline(
     inscritos["mes"]  = month
     inscritos["anio"] = year
 
-    # Drop internal traceability column (kept in _source_file only for
-    # debugging; not part of the output schema)
+    # Drop internal traceability column (kept in _source_file only for debugging during development).
     inscritos = inscritos.drop(columns=["_source_file"], errors="ignore")
 
     return inscritos
@@ -384,7 +473,8 @@ if __name__ == "__main__":
     inscritos = run_pipeline(bucket_prefix, month, year)
 
     # Write output artefacts consumed by Kestra outputFiles
-    output_name = f"formacion_{year}_{month}.parquet"
+    data_processed = os.environ.get("DATA_PROCESSED", "formacion")
+    output_name = f"{data_processed}_{year}_{month}.parquet"
     inscritos.to_parquet(output_name, index=False)
     print(f"  Written: {output_name}  ({len(inscritos)} rows)")
 

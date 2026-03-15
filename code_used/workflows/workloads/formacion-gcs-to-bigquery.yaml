@@ -1,0 +1,315 @@
+id: formacion-gcs-to-bigquery
+namespace: public_employment_pulse
+
+inputs:
+  - id: year_of_interest
+    type: SELECT
+    description: Year of data to load.
+    displayName: "Choose the year of interest."
+    defaults: "2026"
+    values: [ "2024", "2025", "2026" ]
+
+  - id: month_of_interest
+    type: INT
+    description: Month of data to load.
+    displayName: "Choose the month number of interest."
+    defaults: 1
+
+  - id: load_mode
+    type: SELECT
+    description: How to load data into BigQuery.
+    displayName: "Choose load mode."
+    defaults: WRITE_APPEND
+    values: [ WRITE_APPEND, WRITE_TRUNCATE, WRITE_EMPTY ]
+
+variables:
+  month_name: "{% set month_names = {1: 'january', 2: 'february', 3: 'march', 4: 'april', 5: 'may', 6: 'june', 7: 'july', 8: 'august', 9: 'september', 10: 'october', 11: 'november', 12: 'december'} %}{{ month_names[inputs.month_of_interest] }}"
+  gcs_path: "gs://employment-agency-operational-data/formacion/{{ inputs.year_of_interest }}/{{ vars.month_name }}/formacion_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}.parquet"
+  bq_dataset: "operations_co"
+  bq_table:   "formacion"
+
+tasks:
+
+  # ── 1. LOG START ──────────────────────────────────────────────────────────
+  - id: log_workflow_start
+    type: io.kestra.plugin.core.log.Log
+    message: |
+      Starting BigQuery load for:
+      File: {{ render(vars.gcs_path) }}
+      Dataset: {{ render(vars.bq_dataset) }}
+      Table: {{ render(vars.bq_table) }}
+      Load Mode: {{ inputs.load_mode }}
+
+  # ── 2. CREATE DATASET ─────────────────────────────────────────────────────
+  - id: create_bigquery_dataset
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      CREATE SCHEMA IF NOT EXISTS `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}`
+      OPTIONS(
+        location='US',
+        description='Public Employment Pulse Data'
+      );
+
+  # ── 3. CREATE TABLE ───────────────────────────────────────────────────────
+  - id: create_bigquery_table
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      CREATE TABLE IF NOT EXISTS `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}` (
+        unique_row_id         STRING,
+        tipo_de_documento     STRING,
+        numero_de_documento   STRING,
+        nombres               STRING,
+        celular               STRING,
+        telefono              STRING,
+        email                 STRING,
+        edad                  INT64,
+        rango_de_edad         STRING,
+        genero                STRING,
+        direccion_residencia  STRING,
+        barrio                STRING,
+        formacion             STRING,
+        curso_inscrito        STRING,
+        autorizacion_datos    STRING,
+        cursos_previos_co     STRING,
+        anexo_cedula          STRING,
+        fecha_de_nacimiento   TIMESTAMP,
+        fecha_de_registro     TIMESTAMP,
+        tipo_discapacidad     STRING,
+        discapacidad          STRING,
+        grupos_etnicos        STRING,
+        vca                   STRING,
+        migrante              STRING,
+        vvg                   STRING,
+        reincorporados        STRING,
+        mes                   INT64,
+        anio                  INT64,
+        filename              STRING,
+        created_at            TIMESTAMP,
+        loaded_at             TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+      )
+      PARTITION BY DATE(fecha_de_registro)
+      CLUSTER BY formacion, genero, rango_de_edad
+      OPTIONS(
+        description='Course enrollment registrations — Centro de Oportunidades',
+        require_partition_filter=false
+      );
+
+  # ── 4. LOAD PARQUET → BIGQUERY ────────────────────────────────────────────
+  - id: load_parquet_to_bigquery
+    type: io.kestra.plugin.gcp.bigquery.LoadFromGcs
+    from:
+      - "{{ render(vars.gcs_path) }}"
+    destinationTable: "{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}"
+    format: PARQUET
+    writeDisposition: "{{ inputs.load_mode }}"
+    autodetect: false
+    schema:
+      fields:
+        - { name: unique_row_id,        type: STRING,    mode: NULLABLE }
+        - { name: tipo_de_documento,    type: STRING,    mode: NULLABLE }
+        - { name: numero_de_documento,  type: STRING,    mode: NULLABLE }
+        - { name: nombres,              type: STRING,    mode: NULLABLE }
+        - { name: celular,              type: STRING,    mode: NULLABLE }
+        - { name: telefono,             type: STRING,    mode: NULLABLE }
+        - { name: email,                type: STRING,    mode: NULLABLE }
+        - { name: edad,                 type: INT64,     mode: NULLABLE }
+        - { name: rango_de_edad,        type: STRING,    mode: NULLABLE }
+        - { name: genero,               type: STRING,    mode: NULLABLE }
+        - { name: direccion_residencia, type: STRING,    mode: NULLABLE }
+        - { name: barrio,               type: STRING,    mode: NULLABLE }
+        - { name: formacion,            type: STRING,    mode: NULLABLE }
+        - { name: curso_inscrito,       type: STRING,    mode: NULLABLE }
+        - { name: autorizacion_datos,   type: STRING,    mode: NULLABLE }
+        - { name: cursos_previos_co,    type: STRING,    mode: NULLABLE }
+        - { name: anexo_cedula,         type: STRING,    mode: NULLABLE }
+        - { name: fecha_de_nacimiento,  type: TIMESTAMP, mode: NULLABLE }
+        - { name: fecha_de_registro,    type: TIMESTAMP, mode: NULLABLE }
+        - { name: tipo_discapacidad,    type: STRING,    mode: NULLABLE }
+        - { name: discapacidad,         type: STRING,    mode: NULLABLE }
+        - { name: grupos_etnicos,       type: STRING,    mode: NULLABLE }
+        - { name: vca,                  type: STRING,    mode: NULLABLE }
+        - { name: migrante,             type: STRING,    mode: NULLABLE }
+        - { name: vvg,                  type: STRING,    mode: NULLABLE }
+        - { name: reincorporados,       type: STRING,    mode: NULLABLE }
+        - { name: mes,                  type: INT64,     mode: NULLABLE }
+        - { name: anio,                 type: INT64,     mode: NULLABLE }
+        - { name: filename,             type: STRING,    mode: NULLABLE }
+        - { name: created_at,           type: TIMESTAMP, mode: NULLABLE }
+
+  # ── 5. VERIFY LOAD ────────────────────────────────────────────────────────
+  - id: verify_load_count
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      SELECT
+        COUNT(*)                    AS total_records,
+        COUNT(DISTINCT unique_row_id) AS unique_records,
+        MIN(fecha_de_registro)      AS earliest_registration,
+        MAX(fecha_de_registro)      AS latest_registration,
+        COUNT(DISTINCT numero_de_documento) AS unique_enrollees,
+        filename
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE filename = 'formacion_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}'
+      GROUP BY filename;
+    store: true
+
+  # ── 6. DATA QUALITY CHECK ─────────────────────────────────────────────────
+  - id: check_data_quality
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      SELECT 'Missing numero_de_documento' AS issue, COUNT(*) AS count
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE numero_de_documento IS NULL
+        AND filename = 'formacion_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}'
+
+      UNION ALL
+
+      SELECT 'Missing nombres' AS issue, COUNT(*) AS count
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE nombres IS NULL OR nombres = ''
+        AND filename = 'formacion_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}'
+
+      UNION ALL
+
+      SELECT 'Missing edad' AS issue, COUNT(*) AS count
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE edad IS NULL
+        AND filename = 'formacion_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}'
+
+      UNION ALL
+
+      SELECT 'Missing genero' AS issue, COUNT(*) AS count
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE genero IS NULL OR genero = ''
+        AND filename = 'formacion_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}'
+
+      UNION ALL
+
+      SELECT 'Missing formacion (education level)' AS issue, COUNT(*) AS count
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE formacion IS NULL OR formacion = ''
+        AND filename = 'formacion_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}'
+
+      UNION ALL
+
+      SELECT 'Missing curso_inscrito' AS issue, COUNT(*) AS count
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE curso_inscrito IS NULL OR curso_inscrito = ''
+        AND filename = 'formacion_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}'
+
+      ORDER BY count DESC;
+    store: true
+
+  # ── 7. DEMOGRAPHIC SUMMARY ────────────────────────────────────────────────
+  - id: get_demographic_summary
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      SELECT
+        genero,
+        rango_de_edad,
+        COUNT(*) AS count,
+        ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER(), 2) AS percentage
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE filename = 'formacion_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}'
+        AND genero      IS NOT NULL
+        AND rango_de_edad IS NOT NULL
+      GROUP BY genero, rango_de_edad
+      ORDER BY count DESC;
+    store: true
+
+  # ── 8. COURSE ENROLLMENT SUMMARY ─────────────────────────────────────────
+  - id: get_course_summary
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      SELECT
+        curso_inscrito,
+        COUNT(*)  AS total_enrolled,
+        COUNT(DISTINCT numero_de_documento) AS unique_enrollees,
+        COUNTIF(discapacidad   IS NOT NULL) AS con_discapacidad,
+        COUNTIF(grupos_etnicos IS NOT NULL) AS grupos_etnicos,
+        COUNTIF(vvg            IS NOT NULL) AS vvg,
+        COUNTIF(migrante       IS NOT NULL) AS migrantes,
+        COUNTIF(vca            IS NOT NULL) AS vca,
+        COUNTIF(reincorporados IS NOT NULL) AS reincorporados
+      FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.bq_dataset) }}.{{ render(vars.bq_table) }}`
+      WHERE filename = 'formacion_{{ inputs.year_of_interest }}_{{ inputs.month_of_interest }}'
+      GROUP BY curso_inscrito
+      ORDER BY total_enrolled DESC;
+    store: true
+
+  # ── 9. LOG SUMMARY ────────────────────────────────────────────────────────
+  - id: log_load_summary
+    type: io.kestra.plugin.core.log.Log
+    message: |
+      ===== BigQuery Load Summary =====
+      File    : {{ render(vars.gcs_path) }}
+      Dataset : {{ render(vars.bq_dataset) }}
+      Table   : {{ render(vars.bq_table) }}
+      Mode    : {{ inputs.load_mode }}
+      Load completed successfully.
+
+  # ── 10. CONVERT QUERY RESULTS TO CSV ─────────────────────────────────────
+  - id: convert_verification_to_csv
+    type: io.kestra.plugin.serdes.csv.IonToCsv
+    from: "{{ outputs.verify_load_count.uri }}"
+
+  - id: convert_quality_to_csv
+    type: io.kestra.plugin.serdes.csv.IonToCsv
+    from: "{{ outputs.check_data_quality.uri }}"
+
+  - id: convert_demographics_to_csv
+    type: io.kestra.plugin.serdes.csv.IonToCsv
+    from: "{{ outputs.get_demographic_summary.uri }}"
+
+  - id: convert_courses_to_csv
+    type: io.kestra.plugin.serdes.csv.IonToCsv
+    from: "{{ outputs.get_course_summary.uri }}"
+
+  # ── 11. SEND COMPLETION EMAIL ─────────────────────────────────────────────
+  - id: send_completion_email
+    type: io.kestra.plugin.notifications.mail.MailSend
+    from: "{{ kv('SENDER_EMAIL') }}"
+    to:   "{{ kv('RECIPIENT_EMAILS') }}"
+    subject: "BigQuery Load Complete — formacion {{ inputs.month_of_interest }}/{{ inputs.year_of_interest }}"
+    htmlTextContent: |
+      <h2>BigQuery Data Load Completed — Formacion</h2>
+      <p><strong>Dataset:</strong> {{ render(vars.bq_dataset) }}</p>
+      <p><strong>Table:</strong> {{ render(vars.bq_table) }}</p>
+      <p><strong>Source File:</strong> {{ render(vars.gcs_path) }}</p>
+      <p><strong>Load Mode:</strong> {{ inputs.load_mode }}</p>
+
+      <p>Please see attached files for:</p>
+      <ul>
+        <li>Load statistics and record counts</li>
+        <li>Data quality summary (missing fields)</li>
+        <li>Demographic breakdown by gender and age range</li>
+        <li>Enrollment summary by course with population flags</li>
+      </ul>
+
+      <p><em>Workflow executed at: {{ now() }}</em></p>
+    attachments:
+      - name: "load_statistics_{{ inputs.month_of_interest }}_{{ inputs.year_of_interest }}.csv"
+        uri:  "{{ outputs.convert_verification_to_csv.uri }}"
+        contentType: text/csv
+      - name: "data_quality_{{ inputs.month_of_interest }}_{{ inputs.year_of_interest }}.csv"
+        uri:  "{{ outputs.convert_quality_to_csv.uri }}"
+        contentType: text/csv
+      - name: "demographic_summary_{{ inputs.month_of_interest }}_{{ inputs.year_of_interest }}.csv"
+        uri:  "{{ outputs.convert_demographics_to_csv.uri }}"
+        contentType: text/csv
+      - name: "course_summary_{{ inputs.month_of_interest }}_{{ inputs.year_of_interest }}.csv"
+        uri:  "{{ outputs.convert_courses_to_csv.uri }}"
+        contentType: text/csv
+    host:              "{{ kv('SMTP_SERVER') }}"
+    port:              "{{ kv('SMTP_PORT') }}"
+    username:          "{{ kv('GMAIL_USERNAME') }}"
+    password:          "{{ kv('GMAIL_APP_PASSWORD') }}"
+    transportStrategy: SMTP_TLS
+
+triggers:
+  - id: schedule_monthly_load
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 4 5 * *"  # 4 AM on the 5th of each month (1 hour after registros)
+    inputs:
+      year_of_interest: "{{ now() | date('yyyy') }}"
+      month_of_interest: "{{ now() | date('M') | int }}"
+      load_mode: WRITE_APPEND

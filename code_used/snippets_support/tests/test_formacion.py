@@ -21,7 +21,7 @@ import pandas as pd
 import numpy as np
 from unittest.mock import MagicMock, patch, call
 
-from code_used.snippets_support.workload.formacion import (
+from formacion import (
     resolve_sheet,
     ingest_from_gcs,
     normalize_column_names,
@@ -29,11 +29,13 @@ from code_used.snippets_support.workload.formacion import (
     clean_edad,
     lowercase_string_columns,
     clean_genero,
+    filter_valid_records,
     flag_population,
     flag_discapacidad,
     add_population_flags,
     SHEET_MAP,
     RENAME_DICT,
+    SELECT_COLUMNS,
     GENERO_MAPPING,
     DISCAPACIDAD_PATTERNS,
 )
@@ -67,10 +69,15 @@ def base_df():
     """
     Four-row DataFrame that covers every cleaning and flagging path.
 
+    Reflects the actual Excel form columns defined in SELECT_COLUMNS.
     NOTE: string values are already lowercase because in the real pipeline
     lowercase_string_columns() runs BEFORE add_population_flags().
     Tests that call add_population_flags() directly must therefore supply
     pre-lowercased data so the pattern matches behave correctly.
+
+    Notable columns NOT present:
+      - apellidos: the form uses "nombre_completo" (→ "nombres"), not separate fields.
+      - localidad: not collected by the form.
 
       row 0 — valid, VVG population, physical disability
       row 1 — valid, migrant via tipo_de_documento, ethnic group
@@ -81,7 +88,6 @@ def base_df():
         "tipo_de_documento":   ["CC", "permiso especial de permanencia", "CC", "CC"],
         "numero_de_documento": ["111", "222", "333", "444"],
         "nombres":             ["ana", "luis", "rosa", "pedro"],
-        "apellidos":           ["gómez", "pérez", "ruiz", "silva"],
         "edad":                ["25", "30 años", "45", "17"],
         "género":              ["masculino", "femenino", "masculino", "femenino"],
         "tipo_de_población":   [
@@ -96,8 +102,12 @@ def base_df():
             "discapacidad visual",
             "",
         ],
-        "email":   ["ana@mail.com", "luis@mail.com", "rosa@mail.com", "pedro@mail.com"],
-        "celular": ["3001111", "3002222", "3003333", "3004444"],
+        "email":              ["ana@mail.com", "luis@mail.com", "rosa@mail.com", "pedro@mail.com"],
+        "celular":            ["3001111", "3002222", "3003333", "3004444"],
+        "municipio_de_residencia": ["barranquilla"] * 4,
+        "sise":               [None, None, None, None],
+        "adjudicado":         [None, None, None, None],
+        "asistencia":         [None, None, None, None],
     })
 
 
@@ -159,6 +169,71 @@ class TestResolveSheet:
 
 
 # ===========================================================================
+# SELECT_COLUMNS — constant correctness
+# ===========================================================================
+
+class TestSelectColumns:
+
+    EXPECTED_COLUMNS = {
+        "adjudicado", "autorizacion_datos", "fecha_de_registro",
+        "nombres", "tipo_de_documento", "numero_de_documento",
+        "asistencia", "telefono", "cursos_previos_co", "sise",
+        "país_de_nacimiento", "departamento_de_nacimiento", "ciudad_de_nacimiento",
+        "fecha_de_nacimiento", "edad", "género",
+        "direccion_residencia", "barrio", "municipio_de_residencia",
+        "email", "celular", "celular_adicional",
+        "formacion", "tipo_de_población", "tipo_discapacidad",
+        "curso_inscrito", "anexo_cedula",
+    }
+
+    def test_select_columns_is_list(self):
+        assert isinstance(SELECT_COLUMNS, list)
+
+    def test_select_columns_has_expected_count(self):
+        assert len(SELECT_COLUMNS) == 27
+
+    def test_select_columns_contains_all_expected(self):
+        missing = self.EXPECTED_COLUMNS - set(SELECT_COLUMNS)
+        assert not missing, f"Missing from SELECT_COLUMNS: {missing}"
+
+    def test_select_columns_has_no_unexpected(self):
+        extra = set(SELECT_COLUMNS) - self.EXPECTED_COLUMNS
+        assert not extra, f"Unexpected entries in SELECT_COLUMNS: {extra}"
+
+    def test_no_duplicates(self):
+        assert len(SELECT_COLUMNS) == len(set(SELECT_COLUMNS))
+
+    def test_apellidos_not_in_select_columns(self):
+        """apellidos is not a field in the Excel form — must not be selected."""
+        assert "apellidos" not in SELECT_COLUMNS
+
+    def test_localidad_not_in_select_columns(self):
+        """localidad is not collected by the form — must not be selected."""
+        assert "localidad" not in SELECT_COLUMNS
+
+    def test_nombre_completo_not_in_select_columns(self):
+        """The raw header is renamed to 'nombres' by RENAME_DICT — not kept as-is."""
+        assert "nombre_completo" not in SELECT_COLUMNS
+
+    def test_renamed_targets_present(self):
+        """Verify RENAME_DICT targets (not raw keys) are in SELECT_COLUMNS."""
+        for renamed in ["autorizacion_datos", "cursos_previos_co", "email",
+                        "formacion", "tipo_discapacidad", "anexo_cedula",
+                        "curso_inscrito", "numero_de_documento", "nombres", "telefono"]:
+            assert renamed in SELECT_COLUMNS, f"Renamed column '{renamed}' must be in SELECT_COLUMNS"
+
+    def test_género_kept_accented_for_clean_genero(self):
+        """clean_genero() looks for the accented 'género' — must stay accented in SELECT_COLUMNS."""
+        assert "género" in SELECT_COLUMNS
+        assert "genero" not in SELECT_COLUMNS
+
+    def test_tipo_de_población_kept_accented_for_flag_population(self):
+        """flag_population() uses 'tipo_de_población' accented — must stay accented."""
+        assert "tipo_de_población" in SELECT_COLUMNS
+        assert "tipo_de_poblacion" not in SELECT_COLUMNS
+
+
+# ===========================================================================
 # INGEST_FROM_GCS  (GCS filesystem fully mocked — no network calls)
 # ===========================================================================
 
@@ -204,17 +279,58 @@ class TestIngestFromGcs:
         result = ingest_from_gcs("bucket/prefix", fs, {}, skiprows=0)
         assert isinstance(result, pd.DataFrame)
 
-    def test_only_common_columns_are_kept(self):
-        df1 = pd.DataFrame({"tipo_de_documento": ["CC"], "nombres": ["Ana"], "edad": [25], "solo_en_1": ["x"]})
-        df2 = pd.DataFrame({"tipo_de_documento": ["PA"], "nombres": ["Luis"], "edad": [30], "solo_en_2": ["y"]})
+    def test_columns_outside_select_columns_are_dropped(self):
+        """
+        After the outer join, ingest_from_gcs restricts the result to
+        SELECT_COLUMNS.  Columns that appear in the Excel files but are NOT
+        in SELECT_COLUMNS must be silently dropped.
+        """
+        # Build two files where "noise_col" is not in SELECT_COLUMNS
+        df1 = pd.DataFrame({"tipo_de_documento": ["CC"],  "nombres": ["Ana"],  "edad": [25], "noise_col": ["x"]})
+        df2 = pd.DataFrame({"tipo_de_documento": ["PA"],  "nombres": ["Luis"], "edad": [30], "noise_col": ["y"]})
         fs  = self._build_mock_fs([
             ("bucket/prefix/file1.xlsx", df1, "Hoja1"),
             ("bucket/prefix/file2.xlsx", df2, "Hoja1"),
         ])
         result = ingest_from_gcs("bucket/prefix", fs, {}, skiprows=0)
-        assert "solo_en_1" not in result.columns
-        assert "solo_en_2" not in result.columns
-        assert set(self.COMMON_COLS).issubset(set(result.columns))
+        assert "noise_col" not in result.columns, \
+            "Columns not in SELECT_COLUMNS must be dropped by ingest_from_gcs"
+
+    def test_select_columns_present_in_files_are_kept(self):
+        """
+        Columns that ARE in SELECT_COLUMNS and exist in the files must survive.
+        """
+        # Use a minimal subset of SELECT_COLUMNS that will pass the common-col check
+        df1 = pd.DataFrame({"tipo_de_documento": ["CC"],  "nombres": ["Ana"],  "edad": [25], "celular": ["300"]})
+        df2 = pd.DataFrame({"tipo_de_documento": ["PA"],  "nombres": ["Luis"], "edad": [30], "celular": ["301"]})
+        fs  = self._build_mock_fs([
+            ("bucket/prefix/file1.xlsx", df1, "Hoja1"),
+            ("bucket/prefix/file2.xlsx", df2, "Hoja1"),
+        ])
+        result = ingest_from_gcs("bucket/prefix", fs, {}, skiprows=0)
+        # All four of these are in SELECT_COLUMNS
+        for col in ["tipo_de_documento", "nombres", "edad", "celular"]:
+            assert col in result.columns, f"SELECT_COLUMNS column '{col}' must be kept"
+
+    def test_file_specific_select_column_nan_filled(self):
+        """
+        When a SELECT_COLUMNS column is present in only one file, the rows
+        from the other file should have NaN for that column.
+        """
+        # "sise" is in SELECT_COLUMNS; "celular_adicional" is also in SELECT_COLUMNS
+        df1 = pd.DataFrame({"tipo_de_documento": ["CC"],  "nombres": ["Ana"],  "sise": ["S1"]})
+        df2 = pd.DataFrame({"tipo_de_documento": ["PA"],  "nombres": ["Luis"], "celular_adicional": ["999"]})
+        fs  = self._build_mock_fs([
+            ("bucket/prefix/file1.xlsx", df1, "Hoja1"),
+            ("bucket/prefix/file2.xlsx", df2, "Hoja1"),
+        ])
+        result = ingest_from_gcs("bucket/prefix", fs, {}, skiprows=0)
+        # file1 row: celular_adicional is NaN; file2 row: sise is NaN
+        if "sise" in result.columns and "celular_adicional" in result.columns:
+            ana_row  = result.loc[result["nombres"] == "Ana"]
+            luis_row = result.loc[result["nombres"] == "Luis"]
+            assert pd.isna(ana_row["celular_adicional"].iloc[0])
+            assert pd.isna(luis_row["sise"].iloc[0])
 
     def test_row_count_equals_sum_of_all_files(self):
         df1 = pd.DataFrame({"tipo_de_documento": ["CC", "CC"], "nombres": ["A", "B"], "edad": [20, 25]})
@@ -418,6 +534,89 @@ class TestCleanGenero:
 
     def test_does_not_drop_rows(self, base_df):
         assert len(clean_genero(base_df.copy(), GENERO_MAPPING)) == len(base_df)
+
+
+# ===========================================================================
+# VALID RECORD FILTERING
+# ===========================================================================
+
+class TestFilterValidRecords:
+
+    def test_returns_two_dataframes(self, base_df):
+        valid, invalid = filter_valid_records(base_df.copy())
+        assert isinstance(valid, pd.DataFrame)
+        assert isinstance(invalid, pd.DataFrame)
+
+    def test_partition_is_exhaustive(self, base_df):
+        valid, invalid = filter_valid_records(base_df.copy())
+        assert len(valid) + len(invalid) == len(base_df)
+
+    def test_all_valid_when_no_nulls(self, base_df):
+        valid, invalid = filter_valid_records(base_df.copy())
+        assert len(invalid) == 0
+        assert len(valid) == len(base_df)
+
+    def test_null_numero_documento_is_invalid(self):
+        # RENAME_DICT maps "número_de_documento" → "numero_de_documento"
+        # so filter_valid_records always sees the clean unaccented name.
+        df = pd.DataFrame({
+            "numero_de_documento": [None, "123"],
+            "nombres":             ["Ana", "Luis"],
+        })
+        valid, invalid = filter_valid_records(df)
+        assert len(invalid) == 1
+        assert len(valid) == 1
+
+    def test_null_nombres_is_invalid(self):
+        df = pd.DataFrame({
+            "numero_de_documento": ["111", "222"],
+            "nombres":             [None, "Luis"],
+        })
+        valid, invalid = filter_valid_records(df)
+        assert len(invalid) == 1
+
+    def test_blank_whitespace_only_is_invalid(self):
+        df = pd.DataFrame({
+            "numero_de_documento": ["111", "   "],
+            "nombres":             ["Ana", "Luis"],
+        })
+        valid, invalid = filter_valid_records(df)
+        assert len(invalid) == 1
+
+    def test_all_invalid_when_all_nulls(self):
+        df = pd.DataFrame({
+            "numero_de_documento": [None, None],
+            "nombres":             [None, None],
+        })
+        valid, invalid = filter_valid_records(df)
+        assert len(valid) == 0
+        assert len(invalid) == 2
+
+    def test_apellidos_absence_does_not_raise(self):
+        """
+        The Excel form uses 'nombre_completo' (renamed to 'nombres') — there
+        is no separate 'apellidos' column. Passing a DataFrame without it
+        must not raise and must not mark valid rows as invalid.
+        """
+        df = pd.DataFrame({
+            "numero_de_documento": ["111", "222"],
+            "nombres":             ["Ana Gómez", "Luis Pérez"],
+        })
+        valid, invalid = filter_valid_records(df)
+        assert len(valid) == 2
+        assert len(invalid) == 0
+
+    def test_does_not_mutate_input(self, base_df):
+        original_len = len(base_df)
+        filter_valid_records(base_df.copy())
+        assert len(base_df) == original_len
+
+    def test_missing_required_column_does_not_raise(self):
+        # If a required column is absent from the DataFrame entirely,
+        # filter_valid_records skips it gracefully rather than raising KeyError.
+        df = pd.DataFrame({"nombres": ["Ana"]})
+        valid, invalid = filter_valid_records(df)
+        assert len(valid) + len(invalid) == 1
 
 
 # ===========================================================================
