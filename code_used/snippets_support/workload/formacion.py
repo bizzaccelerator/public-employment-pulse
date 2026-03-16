@@ -43,6 +43,8 @@ import gcsfs
 SHEET_MAP: dict[str, str] = {
     "atencion al cliente":  "Matriculados ATENCION MEDIOS DI",
     "bisuteria":            "Hoja1",
+    "cocteleria":           "COCTELERIA BASICA - MAYOR DE 18",
+    "alimentos":            "Hoja1",
 }
 
 # Fallback: if no SHEET_MAP key matches the filename, read the first sheet.
