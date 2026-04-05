@@ -200,6 +200,19 @@ resource "google_project_iam_member" "cloudbuild_sa_container_developer" {
   depends_on = [google_project_service.cloudbuild_api]
 }
 
+# PERMISOS DE BIGQUERY
+resource "google_project_iam_member" "kestra_bigquery_data_editor" {
+  project = var.project_id
+  role    = "roles/bigquery.dataEditor"
+  member  = "serviceAccount:${google_service_account.kestra_sa.email}"
+}
+
+resource "google_project_iam_member" "kestra_bigquery_job_user" {
+  project = var.project_id
+  role    = "roles/bigquery.jobUser"
+  member  = "serviceAccount:${google_service_account.kestra_sa.email}"
+}
+
 # Firewall rule to allow HTTP traffic to Kestra
 resource "google_compute_firewall" "kestra_firewall" {
   name    = "${replace(var.project_name, "_", "-")}-kestra-firewall"
