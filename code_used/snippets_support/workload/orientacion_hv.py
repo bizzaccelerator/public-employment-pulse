@@ -135,7 +135,7 @@ def clean_orientados(df: pd.DataFrame) -> pd.DataFrame:
         "usuarionombre":     "orientador",
     })
 
-    str_cols = df.select_dtypes(include=["object"]).columns
+    str_cols = df.select_dtypes(include=["object", "string"]).columns
     df[str_cols] = df[str_cols].apply(
         lambda col: col.map(lambda v: v.lower() if isinstance(v, str) else v)
     )

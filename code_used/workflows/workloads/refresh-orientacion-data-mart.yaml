@@ -159,24 +159,6 @@ tasks:
       OPTIONS(description='Monthly demographic profile and equity analysis');
 
   # ============================================================================
-  # SHARED CTE LOGIC NOTE
-  # ============================================================================
-  # All queries use two base CTEs:
-  #
-  #   orientacion_rows — all rows WHERE tipo_evento = 'orientacion'
-  #   taller_rows      — all rows WHERE tipo_evento = 'taller'
-  #
-  # Conversion (asistio_taller) is determined by:
-  #   EXISTS(
-  #     SELECT 1 FROM taller_rows t
-  #     WHERE t.numerodocumento = o.numerodocumento
-  #       AND DATE(t.fechaejecucion_orientacion) >= DATE(o.fechaejecucion_orientacion)
-  #   )
-  #
-  # This replaces the old JSON-array UNNEST approach.
-  # ============================================================================
-
-  # ============================================================================
   # DATA MART 1: ORIENTATION FUNNEL MONTHLY
   # ============================================================================
 
@@ -196,7 +178,6 @@ tasks:
           )
           AS
           WITH
-          -- All orientation session rows
           orientacion_rows AS (
             SELECT
               numerodocumento,
@@ -215,17 +196,14 @@ tasks:
             WHERE tipo_evento = 'orientacion'
               AND fechaejecucion_orientacion IS NOT NULL
           ),
-          -- All taller session rows
           taller_rows AS (
             SELECT
               numerodocumento,
-              fechaejecucion_orientacion   AS fechaejecucion_taller,
-              tallerista
+              fechaejecucion_orientacion AS fechaejecucion_taller
             FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_operations) }}.{{ render(vars.base_table) }}`
             WHERE tipo_evento = 'taller'
               AND fechaejecucion_orientacion IS NOT NULL
           ),
-          -- Join: for each orientation, find the nearest taller on-or-after it
           orientacion_con_taller AS (
             SELECT
               o.*,
@@ -245,7 +223,6 @@ tasks:
               o.mes_evento, o.anio_evento, o.departamento, o.ciudad,
               o.indicador, o.tipodireccionamiento, o.porcentajeasistencia, o.edad, o.sexo
           ),
-          -- Aggregate to monthly grain
           monthly_funnel AS (
             SELECT
               DATE_TRUNC(DATE(fechaejecucion_orientacion), MONTH)      AS periodo_mes,
@@ -258,7 +235,6 @@ tasks:
               ciudad,
               indicador,
               tipodireccionamiento,
-
               COUNT(*)                                                   AS total_sesiones_orientacion,
               COUNT(DISTINCT numerodocumento)                            AS personas_unicas_orientadas,
               SUM(asistio_taller)                                        AS sesiones_con_taller,
@@ -268,34 +244,29 @@ tasks:
                 COUNT(DISTINCT CASE WHEN asistio_taller = 1 THEN numerodocumento END),
                 COUNT(DISTINCT numerodocumento)
               ) * 100, 2)                                                AS tasa_conversion_taller_pct,
-
               ROUND(AVG(CASE WHEN asistio_taller = 1 THEN dias_orientacion_a_taller END), 1)
                                                                          AS dias_promedio_orientacion_taller,
               MIN(CASE WHEN asistio_taller = 1 THEN dias_orientacion_a_taller END)
                                                                          AS dias_minimo_orientacion_taller,
               MAX(CASE WHEN asistio_taller = 1 THEN dias_orientacion_a_taller END)
                                                                          AS dias_maximo_orientacion_taller,
-
               COUNTIF(asistio_taller = 1 AND dias_orientacion_a_taller <= 7)
                                                                          AS talleres_dentro_1_semana,
               COUNTIF(asistio_taller = 1 AND dias_orientacion_a_taller BETWEEN 8 AND 30)
                                                                          AS talleres_entre_1_4_semanas,
               COUNTIF(asistio_taller = 1 AND dias_orientacion_a_taller > 30)
                                                                          AS talleres_despues_1_mes,
-
               ROUND(AVG(CASE WHEN asistio_taller = 1
                              THEN SAFE_CAST(porcentajeasistencia AS FLOAT64) END), 2)
                                                                          AS asistencia_promedio_pct,
               COUNTIF(asistio_taller = 1 AND SAFE_CAST(porcentajeasistencia AS FLOAT64) >= 80)
                                                                          AS talleres_alta_asistencia,
-
               ROUND(AVG(edad), 1)                                        AS edad_promedio,
               COUNTIF(sexo = 'm')                                        AS hombres_orientados,
               COUNTIF(sexo = 'f')                                        AS mujeres_orientados,
               COUNTIF(sexo NOT IN ('m','f') OR sexo IS NULL)             AS sexo_no_especificado,
               COUNTIF(asistio_taller = 1 AND sexo = 'm')                 AS hombres_en_talleres,
               COUNTIF(asistio_taller = 1 AND sexo = 'f')                 AS mujeres_en_talleres
-
             FROM orientacion_con_taller
             GROUP BY 1,2,3,4,5,6,7,8,9,10
           )
@@ -325,7 +296,6 @@ tasks:
               AS tasa_conversion_hombres_pct,
             ROUND(SAFE_DIVIDE(mujeres_en_talleres, mujeres_orientados) * 100, 2)
               AS tasa_conversion_mujeres_pct,
-
             SUM(personas_unicas_orientadas) OVER (
               PARTITION BY departamento ORDER BY periodo_mes
               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
@@ -360,13 +330,17 @@ tasks:
               PARTITION BY departamento, indicador ORDER BY periodo_mes
               ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
             ) AS promedio_movil_3_meses_conversion,
-            CAST(CURRENT_TIMESTAMP() AS TIMESTAMP) AS mart_refreshed_at
+            CURRENT_TIMESTAMP() AS mart_refreshed_at
           FROM monthly_funnel;
 
     else:
       - id: refresh_funnel_incremental
         type: io.kestra.plugin.gcp.bigquery.Query
         sql: |
+          -- ── FIX: explicit INSERT column list + bare NULLs in VALUES avoid
+          -- BigQuery's CAST(NULL AS type) type-inference bug that mis-types
+          -- CURRENT_TIMESTAMP() as INT64 when mixed with typed NULL expressions
+          -- in the same SELECT list feeding a MERGE or INSERT.
           MERGE `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_funnel) }}` AS target
           USING (
             WITH
@@ -445,6 +419,9 @@ tasks:
               FROM orientacion_con_taller
               GROUP BY 1,2,3,4,5,6,7,8,9,10
             )
+            -- NOTE: no CAST(NULL AS ...) or CURRENT_TIMESTAMP() here —
+            -- those are supplied directly in the INSERT VALUES clause below
+            -- to avoid BigQuery's type-inference bug.
             SELECT
               periodo_mes, year, month, quarter, month_name, year_month,
               departamento, ciudad, indicador, tipodireccionamiento,
@@ -457,23 +434,14 @@ tasks:
               hombres_orientados, mujeres_orientados, sexo_no_especificado,
               hombres_en_talleres, mujeres_en_talleres,
               ROUND(SAFE_DIVIDE(hombres_en_talleres, hombres_orientados)*100,2) AS tasa_conversion_hombres_pct,
-              ROUND(SAFE_DIVIDE(mujeres_en_talleres, mujeres_orientados)*100,2) AS tasa_conversion_mujeres_pct,
-              CAST(NULL AS INT64)   AS acumulado_orientados_dept,
-              CAST(NULL AS INT64)   AS acumulado_talleres_dept,
-              CAST(NULL AS INT64)   AS mes_anterior_orientados,
-              CAST(NULL AS FLOAT64) AS crecimiento_mom_pct,
-              CAST(NULL AS INT64)   AS mismo_mes_anio_anterior,
-              CAST(NULL AS FLOAT64) AS crecimiento_yoy_pct,
-              CAST(NULL AS FLOAT64) AS promedio_movil_3_meses_orientados,
-              CAST(NULL AS FLOAT64) AS promedio_movil_3_meses_conversion,
-              CAST(CURRENT_TIMESTAMP() AS TIMESTAMP) AS mart_refreshed_at
+              ROUND(SAFE_DIVIDE(mujeres_en_talleres, mujeres_orientados)*100,2) AS tasa_conversion_mujeres_pct
             FROM monthly_funnel
           ) AS source
-          ON  target.periodo_mes      = source.periodo_mes
-          AND target.departamento     = source.departamento
-          AND IFNULL(target.ciudad,'')         = IFNULL(source.ciudad,'')
-          AND IFNULL(target.indicador,'')      = IFNULL(source.indicador,'')
-          AND IFNULL(target.tipodireccionamiento,'') = IFNULL(source.tipodireccionamiento,'')
+          ON  target.periodo_mes                        = source.periodo_mes
+          AND target.departamento                       = source.departamento
+          AND IFNULL(target.ciudad,'')                  = IFNULL(source.ciudad,'')
+          AND IFNULL(target.indicador,'')               = IFNULL(source.indicador,'')
+          AND IFNULL(target.tipodireccionamiento,'')    = IFNULL(source.tipodireccionamiento,'')
           WHEN MATCHED THEN UPDATE SET
             total_sesiones_orientacion        = source.total_sesiones_orientacion,
             personas_unicas_orientadas        = source.personas_unicas_orientadas,
@@ -496,8 +464,42 @@ tasks:
             mujeres_en_talleres               = source.mujeres_en_talleres,
             tasa_conversion_hombres_pct       = source.tasa_conversion_hombres_pct,
             tasa_conversion_mujeres_pct       = source.tasa_conversion_mujeres_pct,
-            mart_refreshed_at                 = source.mart_refreshed_at
-          WHEN NOT MATCHED THEN INSERT ROW;
+            mart_refreshed_at                 = CURRENT_TIMESTAMP()
+          WHEN NOT MATCHED THEN INSERT (
+            periodo_mes, year, month, quarter, month_name, year_month,
+            departamento, ciudad, indicador, tipodireccionamiento,
+            total_sesiones_orientacion, personas_unicas_orientadas,
+            sesiones_con_taller, personas_unicas_en_talleres, tasa_conversion_taller_pct,
+            dias_promedio_orientacion_taller, dias_minimo_orientacion_taller,
+            dias_maximo_orientacion_taller, talleres_dentro_1_semana,
+            talleres_entre_1_4_semanas, talleres_despues_1_mes,
+            asistencia_promedio_pct, talleres_alta_asistencia, edad_promedio,
+            hombres_orientados, mujeres_orientados, sexo_no_especificado,
+            hombres_en_talleres, mujeres_en_talleres,
+            tasa_conversion_hombres_pct, tasa_conversion_mujeres_pct,
+            acumulado_orientados_dept, acumulado_talleres_dept,
+            mes_anterior_orientados, crecimiento_mom_pct,
+            mismo_mes_anio_anterior, crecimiento_yoy_pct,
+            promedio_movil_3_meses_orientados, promedio_movil_3_meses_conversion,
+            mart_refreshed_at
+          ) VALUES (
+            source.periodo_mes, source.year, source.month, source.quarter,
+            source.month_name, source.year_month,
+            source.departamento, source.ciudad, source.indicador, source.tipodireccionamiento,
+            source.total_sesiones_orientacion, source.personas_unicas_orientadas,
+            source.sesiones_con_taller, source.personas_unicas_en_talleres,
+            source.tasa_conversion_taller_pct,
+            source.dias_promedio_orientacion_taller, source.dias_minimo_orientacion_taller,
+            source.dias_maximo_orientacion_taller, source.talleres_dentro_1_semana,
+            source.talleres_entre_1_4_semanas, source.talleres_despues_1_mes,
+            source.asistencia_promedio_pct, source.talleres_alta_asistencia,
+            source.edad_promedio,
+            source.hombres_orientados, source.mujeres_orientados, source.sexo_no_especificado,
+            source.hombres_en_talleres, source.mujeres_en_talleres,
+            source.tasa_conversion_hombres_pct, source.tasa_conversion_mujeres_pct,
+            NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+            CURRENT_TIMESTAMP()
+          );
 
       - id: recalculate_funnel_window_functions
         type: io.kestra.plugin.gcp.bigquery.Query
@@ -567,8 +569,6 @@ tasks:
           )
           AS
           WITH
-          -- ── Person profile (one row per person, from orientation rows only) ──────
-          -- Demographics are stable per-person; take first non-null from orientacion rows.
           person_profile AS (
             SELECT
               numerodocumento,
@@ -581,7 +581,6 @@ tasks:
               ANY_VALUE(vvg)              AS vvg,
               ANY_VALUE(reincorporados)   AS reincorporados,
               ANY_VALUE(rango_de_edad)    AS grupo_edad_estandar,
-              -- Segment: first matching vulnerability wins
               CASE
                 WHEN LOGICAL_OR(grupos_etnicos IS NOT NULL)   THEN 'Grupos Étnicos'
                 WHEN LOGICAL_OR(vca IS NOT NULL)              THEN 'VCA (Víctimas Conflicto)'
@@ -591,7 +590,6 @@ tasks:
                 WHEN LOGICAL_OR(reincorporados IS NOT NULL)   THEN 'Reincorporados'
                 ELSE 'Población General'
               END AS segmento_demografico,
-              -- Vulnerability count per person
               (CASE WHEN LOGICAL_OR(grupos_etnicos IS NOT NULL)  THEN 1 ELSE 0 END +
                CASE WHEN LOGICAL_OR(vca IS NOT NULL)             THEN 1 ELSE 0 END +
                CASE WHEN LOGICAL_OR(discapacidad IS NOT NULL)    THEN 1 ELSE 0 END +
@@ -602,7 +600,6 @@ tasks:
             FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_operations) }}.{{ render(vars.base_table) }}`
             GROUP BY numerodocumento
           ),
-          -- ── Orientation event rows with demographics ──────────────────────────────
           orientacion_events AS (
             SELECT
               DATE_TRUNC(DATE(e.fechaejecucion_orientacion), MONTH) AS periodo_mes,
@@ -618,7 +615,6 @@ tasks:
             WHERE e.tipo_evento = 'orientacion'
               AND e.fechaejecucion_orientacion IS NOT NULL
           ),
-          -- ── Taller event rows with demographics ───────────────────────────────────
           taller_events AS (
             SELECT
               DATE_TRUNC(DATE(e.fechaejecucion_orientacion), MONTH) AS periodo_mes,
@@ -634,7 +630,6 @@ tasks:
             WHERE e.tipo_evento = 'taller'
               AND e.fechaejecucion_orientacion IS NOT NULL
           ),
-          -- ── All grain combinations (period × demo dimensions) ────────────────────
           all_periods AS (
             SELECT DISTINCT periodo_mes, departamento, ciudad, segmento_demografico, grupo_edad_estandar, sexo
             FROM orientacion_events
@@ -706,17 +701,14 @@ tasks:
             total_sesiones_orientacion,
             con_multiples_vulnerabilidades,
             tasa_conversion_taller_pct,
-            -- Gender distribution (from sexo dimension column)
             CASE WHEN sexo = 'm' THEN personas_unicas ELSE 0 END AS hombres,
             CASE WHEN sexo = 'f' THEN personas_unicas ELSE 0 END AS mujeres,
             ROUND(SAFE_DIVIDE(
-              CASE WHEN sexo='m' THEN personas_unicas ELSE 0 END, personas_unicas
+              CASE WHEN sexo = 'm' THEN personas_unicas ELSE 0 END, personas_unicas
             ) * 100, 2) AS pct_hombres,
             ROUND(SAFE_DIVIDE(
-              CASE WHEN sexo='f' THEN personas_unicas ELSE 0 END, personas_unicas
+              CASE WHEN sexo = 'f' THEN personas_unicas ELSE 0 END, personas_unicas
             ) * 100, 2) AS pct_mujeres,
-
-            -- Window functions across full history
             SUM(personas_unicas) OVER (
               PARTITION BY departamento, segmento_demografico ORDER BY periodo_mes
               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
@@ -743,17 +735,36 @@ tasks:
               PARTITION BY departamento, segmento_demografico ORDER BY periodo_mes
               ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
             ) AS promedio_movil_3_meses,
-            CAST(CURRENT_TIMESTAMP() AS TIMESTAMP) AS mart_refreshed_at
+            CURRENT_TIMESTAMP() AS mart_refreshed_at
           FROM monthly_demographics;
 
     else:
       - id: refresh_demographics_incremental
         type: io.kestra.plugin.gcp.bigquery.Query
         sql: |
+          -- ── FIX: explicit INSERT column list on INSERT INTO so BigQuery
+          -- resolves NULL types from the target schema, not the SELECT
+          -- expression — avoids the CAST(NULL AS type) + CURRENT_TIMESTAMP()
+          -- type-inference corruption bug.
           DELETE FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_demographics) }}`
           WHERE periodo_mes = DATE_TRUNC(DATE('{{ render(vars.start_date) }}'), MONTH);
 
           INSERT INTO `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_demographics) }}`
+          (
+            periodo_mes, year, month, quarter, month_name, year_month,
+            departamento, ciudad, segmento_demografico, grupo_edad_estandar, sexo,
+            personas_unicas, personas_unicas_con_orientacion, personas_unicas_con_taller,
+            total_sesiones_orientacion, con_multiples_vulnerabilidades,
+            tasa_conversion_taller_pct,
+            hombres, mujeres, pct_hombres, pct_mujeres,
+            acumulado_personas_dept_segmento,
+            mes_anterior_personas,
+            crecimiento_mom_pct,
+            mismo_mes_anio_anterior,
+            crecimiento_yoy_pct,
+            promedio_movil_3_meses,
+            mart_refreshed_at
+          )
           WITH
           person_profile AS (
             SELECT
@@ -826,8 +837,8 @@ tasks:
           monthly_demographics AS (
             SELECT
               g.periodo_mes,
-              EXTRACT(YEAR  FROM g.periodo_mes) AS year,
-              EXTRACT(MONTH FROM g.periodo_mes) AS month,
+              EXTRACT(YEAR  FROM g.periodo_mes)   AS year,
+              EXTRACT(MONTH FROM g.periodo_mes)   AS month,
               EXTRACT(QUARTER FROM g.periodo_mes) AS quarter,
               FORMAT_DATE('%B',    g.periodo_mes) AS month_name,
               FORMAT_DATE('%Y-%m', g.periodo_mes) AS year_month,
@@ -843,34 +854,44 @@ tasks:
                 AS tasa_conversion_taller_pct
             FROM all_periods g
             LEFT JOIN orientation_agg o
-              ON g.periodo_mes=o.periodo_mes AND g.departamento=o.departamento
+              ON  g.periodo_mes=o.periodo_mes AND g.departamento=o.departamento
               AND IFNULL(g.ciudad,'')=IFNULL(o.ciudad,'')
               AND g.segmento_demografico=o.segmento_demografico
               AND g.grupo_edad_estandar=o.grupo_edad_estandar
               AND IFNULL(g.sexo,'')=IFNULL(o.sexo,'')
             LEFT JOIN taller_agg t
-              ON g.periodo_mes=t.periodo_mes AND g.departamento=t.departamento
+              ON  g.periodo_mes=t.periodo_mes AND g.departamento=t.departamento
               AND IFNULL(g.ciudad,'')=IFNULL(t.ciudad,'')
               AND g.segmento_demografico=t.segmento_demografico
               AND g.grupo_edad_estandar=t.grupo_edad_estandar
               AND IFNULL(g.sexo,'')=IFNULL(t.sexo,'')
           )
+          -- NOTE: no CAST(NULL AS ...) here — bare NULLs resolve from the
+          -- named INSERT column list above, avoiding the BigQuery bug.
           SELECT
             periodo_mes, year, month, quarter, month_name, year_month,
             departamento, ciudad, segmento_demografico, grupo_edad_estandar, sexo,
-            personas_unicas, personas_unicas_con_orientacion, personas_unicas_con_taller,
-            total_sesiones_orientacion, con_multiples_vulnerabilidades, tasa_conversion_taller_pct,
-            CASE WHEN sexo='m' THEN personas_unicas ELSE 0 END AS hombres,
-            CASE WHEN sexo='f' THEN personas_unicas ELSE 0 END AS mujeres,
-            ROUND(SAFE_DIVIDE(CASE WHEN sexo='m' THEN personas_unicas ELSE 0 END, personas_unicas)*100,2) AS pct_hombres,
-            ROUND(SAFE_DIVIDE(CASE WHEN sexo='f' THEN personas_unicas ELSE 0 END, personas_unicas)*100,2) AS pct_mujeres,
-            CAST(NULL AS INT64)   AS acumulado_personas_dept_segmento,
-            CAST(NULL AS INT64)   AS mes_anterior_personas,
-            CAST(NULL AS FLOAT64) AS crecimiento_mom_pct,
-            CAST(NULL AS INT64)   AS mismo_mes_anio_anterior,
-            CAST(NULL AS FLOAT64) AS crecimiento_yoy_pct,
-            CAST(NULL AS FLOAT64) AS promedio_movil_3_meses,
-            CAST(CURRENT_TIMESTAMP() AS TIMESTAMP) AS mart_refreshed_at
+            personas_unicas,
+            personas_unicas_con_orientacion,
+            personas_unicas_con_taller,
+            total_sesiones_orientacion,
+            con_multiples_vulnerabilidades,
+            tasa_conversion_taller_pct,
+            CASE WHEN sexo = 'm' THEN personas_unicas ELSE 0 END AS hombres,
+            CASE WHEN sexo = 'f' THEN personas_unicas ELSE 0 END AS mujeres,
+            ROUND(SAFE_DIVIDE(
+              CASE WHEN sexo = 'm' THEN personas_unicas ELSE 0 END, personas_unicas
+            ) * 100, 2) AS pct_hombres,
+            ROUND(SAFE_DIVIDE(
+              CASE WHEN sexo = 'f' THEN personas_unicas ELSE 0 END, personas_unicas
+            ) * 100, 2) AS pct_mujeres,
+            NULL  AS acumulado_personas_dept_segmento,
+            NULL  AS mes_anterior_personas,
+            NULL  AS crecimiento_mom_pct,
+            NULL  AS mismo_mes_anio_anterior,
+            NULL  AS crecimiento_yoy_pct,
+            NULL  AS promedio_movil_3_meses,
+            CURRENT_TIMESTAMP() AS mart_refreshed_at
           FROM monthly_demographics;
 
       - id: recalculate_demographics_window_functions
