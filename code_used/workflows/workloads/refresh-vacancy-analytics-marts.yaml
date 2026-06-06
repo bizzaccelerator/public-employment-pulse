@@ -89,7 +89,6 @@ tasks:
         - id: refresh_performance_full
           type: io.kestra.plugin.gcp.bigquery.Query
           sql: |
-            -- Full refresh: recreate entire vacancy performance table
             CREATE OR REPLACE TABLE `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_performance) }}`
             PARTITION BY DATE_TRUNC(registration_month, MONTH)
             CLUSTER BY estado_actual, tipo_de_contrato, agente_aprobo
@@ -106,136 +105,94 @@ tasks:
                 EXTRACT(QUARTER FROM fecha_registro) AS quarter,
                 FORMAT_DATE('%B', DATE(fecha_registro)) AS month_name,
                 FORMAT_DATE('%Y-%m', DATE(fecha_registro)) AS year_month,
-                
-                -- Status and Type Dimensions
                 estado_actual,
                 tipo_de_vacante,
                 tipo_de_contrato,
                 agente_aprobo,
                 punto_atencion,
-                
-                -- Core Vacancy Metrics
                 COUNT(*) AS total_vacancies,
                 COUNT(DISTINCT codigo_proceso) AS unique_processes,
                 SUM(puestos_de_trabajo) AS total_positions_offered,
                 SUM(n_postulados) AS total_applications,
-                
-                -- Application Rate Metrics
                 COUNTIF(n_postulados > 0) AS vacancies_with_applications,
                 COUNTIF(n_postulados = 0) AS vacancies_no_applications,
                 COUNTIF(n_postulados >= 10) AS vacancies_high_interest,
                 COUNTIF(n_postulados >= 50) AS vacancies_very_high_interest,
-                
-                -- Vacancy Status Distribution
                 COUNTIF(estado_actual = 'Activa') AS active_vacancies,
                 COUNTIF(estado_actual = 'Cerrada') AS closed_vacancies,
                 COUNTIF(estado_actual = 'Vencida') AS expired_vacancies,
                 COUNTIF(estado_actual = 'Suspendida') AS suspended_vacancies,
-                
-                -- Contract Type Distribution
                 COUNTIF(tipo_de_contrato = 'Término Indefinido') AS indefinite_contracts,
                 COUNTIF(tipo_de_contrato = 'Término Fijo') AS fixed_term_contracts,
                 COUNTIF(tipo_de_contrato = 'Obra o Labor') AS project_based_contracts,
                 COUNTIF(tipo_de_contrato = 'Prestación de Servicios') AS service_contracts,
-                
-                -- Vacancy Type Distribution
                 COUNTIF(tipo_de_vacante = 'Demandante') AS applicant_type,
                 COUNTIF(tipo_de_vacante = 'Ordinaria') AS regular_type,
-                
-                -- Time Metrics (in days)
                 AVG(DATE_DIFF(DATE(fecha_vencimiento), DATE(fecha_registro), DAY)) AS avg_posting_duration_days,
                 AVG(CASE 
                   WHEN estado_actual = 'Cerrada' 
                   THEN DATE_DIFF(CURRENT_DATE(), DATE(fecha_registro), DAY) 
                   ELSE NULL 
                 END) AS avg_time_to_close_days,
-                
-                -- Application Efficiency Metrics
                 AVG(n_postulados) AS avg_applications_per_vacancy,
                 AVG(SAFE_DIVIDE(n_postulados, puestos_de_trabajo)) AS avg_applications_per_position,
                 MAX(n_postulados) AS max_applications_single_vacancy,
-                
-                -- Fill Rate Estimation (closed vacancies as proxy for filled)
                 SAFE_DIVIDE(
                   COUNTIF(estado_actual = 'Cerrada'),
                   COUNT(*)
                 ) * 100 AS estimated_fill_rate_pct
-                
               FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_operations) }}.{{ render(vars.base_table) }}`
               WHERE fecha_registro IS NOT NULL
               GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
             )
-            
             SELECT
-              -- Date Dimensions
               registration_month,
               year,
               month,
               quarter,
               month_name,
               year_month,
-              
-              -- Status and Type Dimensions
               estado_actual,
               tipo_de_vacante,
               tipo_de_contrato,
               agente_aprobo,
               punto_atencion,
-              
-              -- Core Metrics
               total_vacancies,
               unique_processes,
               total_positions_offered,
               total_applications,
-              
-              -- Application Rate Metrics
               vacancies_with_applications,
               vacancies_no_applications,
               ROUND(SAFE_DIVIDE(vacancies_with_applications, total_vacancies) * 100, 2) AS pct_with_applications,
               vacancies_high_interest,
               vacancies_very_high_interest,
-              
-              -- Status Distribution
               active_vacancies,
               closed_vacancies,
               expired_vacancies,
               suspended_vacancies,
               ROUND(SAFE_DIVIDE(active_vacancies, total_vacancies) * 100, 2) AS pct_active,
               ROUND(SAFE_DIVIDE(closed_vacancies, total_vacancies) * 100, 2) AS pct_closed,
-              
-              -- Contract Type Distribution
               indefinite_contracts,
               fixed_term_contracts,
               project_based_contracts,
               service_contracts,
-              
-              -- Vacancy Type Distribution
               applicant_type,
               regular_type,
-              
-              -- Time Metrics
               ROUND(avg_posting_duration_days, 1) AS avg_posting_duration_days,
               ROUND(avg_time_to_close_days, 1) AS avg_time_to_close_days,
-              
-              -- Application Efficiency
               ROUND(avg_applications_per_vacancy, 1) AS avg_applications_per_vacancy,
               ROUND(avg_applications_per_position, 1) AS avg_applications_per_position,
               max_applications_single_vacancy,
               ROUND(estimated_fill_rate_pct, 2) AS estimated_fill_rate_pct,
-              
-              -- Cumulative Metrics by Status
               SUM(total_vacancies) OVER (
                 PARTITION BY estado_actual 
                 ORDER BY registration_month 
                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
               ) AS cumulative_vacancies_by_status,
-              
-              -- Month-over-Month Growth
               LAG(total_vacancies) OVER (
                 PARTITION BY estado_actual, tipo_de_contrato, agente_aprobo
                 ORDER BY registration_month
               ) AS prev_month_vacancies,
-              
               ROUND(SAFE_DIVIDE(
                 total_vacancies - LAG(total_vacancies) OVER (
                   PARTITION BY estado_actual, tipo_de_contrato, agente_aprobo
@@ -246,13 +203,10 @@ tasks:
                   ORDER BY registration_month
                 )
               ) * 100, 2) AS mom_growth_pct,
-              
-              -- Year-over-Year Comparison
               LAG(total_vacancies, 12) OVER (
                 PARTITION BY estado_actual, tipo_de_contrato, agente_aprobo
                 ORDER BY registration_month
               ) AS same_month_last_year,
-              
               ROUND(SAFE_DIVIDE(
                 total_vacancies - LAG(total_vacancies, 12) OVER (
                   PARTITION BY estado_actual, tipo_de_contrato, agente_aprobo
@@ -263,29 +217,23 @@ tasks:
                   ORDER BY registration_month
                 )
               ) * 100, 2) AS yoy_growth_pct,
-              
-              -- 3-Month Moving Averages
               ROUND(AVG(total_vacancies) OVER (
                 PARTITION BY estado_actual, tipo_de_contrato, agente_aprobo
                 ORDER BY registration_month 
                 ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
               ), 1) AS three_month_moving_avg_vacancies,
-              
               ROUND(AVG(avg_applications_per_vacancy) OVER (
                 PARTITION BY estado_actual, tipo_de_contrato, agente_aprobo
                 ORDER BY registration_month 
                 ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
               ), 1) AS three_month_moving_avg_applications,
-              
               CURRENT_TIMESTAMP() AS mart_refreshed_at
-              
             FROM monthly_vacancies;
       
       INCREMENTAL:
         - id: refresh_performance_incremental
           type: io.kestra.plugin.gcp.bigquery.Query
           sql: |
-            -- Monthly incremental refresh: update or insert data for the specified month
             MERGE `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_performance) }}` AS target
             USING (
               WITH monthly_vacancies AS (
@@ -301,46 +249,36 @@ tasks:
                   tipo_de_contrato,
                   agente_aprobo,
                   punto_atencion,
-                  
                   COUNT(*) AS total_vacancies,
                   COUNT(DISTINCT codigo_proceso) AS unique_processes,
                   SUM(puestos_de_trabajo) AS total_positions_offered,
                   SUM(n_postulados) AS total_applications,
-                  
                   COUNTIF(n_postulados > 0) AS vacancies_with_applications,
                   COUNTIF(n_postulados = 0) AS vacancies_no_applications,
                   COUNTIF(n_postulados >= 10) AS vacancies_high_interest,
                   COUNTIF(n_postulados >= 50) AS vacancies_very_high_interest,
-                  
                   COUNTIF(estado_actual = 'Activa') AS active_vacancies,
                   COUNTIF(estado_actual = 'Cerrada') AS closed_vacancies,
                   COUNTIF(estado_actual = 'Vencida') AS expired_vacancies,
                   COUNTIF(estado_actual = 'Suspendida') AS suspended_vacancies,
-                  
                   COUNTIF(tipo_de_contrato = 'Término Indefinido') AS indefinite_contracts,
                   COUNTIF(tipo_de_contrato = 'Término Fijo') AS fixed_term_contracts,
                   COUNTIF(tipo_de_contrato = 'Obra o Labor') AS project_based_contracts,
                   COUNTIF(tipo_de_contrato = 'Prestación de Servicios') AS service_contracts,
-                  
                   COUNTIF(tipo_de_vacante = 'Demandante') AS applicant_type,
                   COUNTIF(tipo_de_vacante = 'Ordinaria') AS regular_type,
-                  
                   AVG(DATE_DIFF(DATE(fecha_vencimiento), DATE(fecha_registro), DAY)) AS avg_posting_duration_days,
                   AVG(CASE WHEN estado_actual = 'Cerrada' THEN DATE_DIFF(CURRENT_DATE(), DATE(fecha_registro), DAY) END) AS avg_time_to_close_days,
-                  
                   AVG(n_postulados) AS avg_applications_per_vacancy,
                   AVG(SAFE_DIVIDE(n_postulados, puestos_de_trabajo)) AS avg_applications_per_position,
                   MAX(n_postulados) AS max_applications_single_vacancy,
-                  
                   SAFE_DIVIDE(COUNTIF(estado_actual = 'Cerrada'), COUNT(*)) * 100 AS estimated_fill_rate_pct
-                  
                 FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_operations) }}.{{ render(vars.base_table) }}`
                 WHERE fecha_registro IS NOT NULL
                   AND DATE(fecha_registro) >= DATE('{{ render(vars.start_date) }}')
                   AND DATE(fecha_registro) < {{ render(vars.end_date) }}
                 GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
               )
-              
               SELECT
                 registration_month,
                 year,
@@ -379,16 +317,7 @@ tasks:
                 ROUND(avg_applications_per_vacancy, 1) AS avg_applications_per_vacancy,
                 ROUND(avg_applications_per_position, 1) AS avg_applications_per_position,
                 max_applications_single_vacancy,
-                ROUND(estimated_fill_rate_pct, 2) AS estimated_fill_rate_pct,
-                NULL AS cumulative_vacancies_by_status,
-                NULL AS prev_month_vacancies,
-                NULL AS mom_growth_pct,
-                NULL AS same_month_last_year,
-                NULL AS yoy_growth_pct,
-                NULL AS three_month_moving_avg_vacancies,
-                NULL AS three_month_moving_avg_applications,
-                CURRENT_TIMESTAMP() AS mart_refreshed_at
-                
+                ROUND(estimated_fill_rate_pct, 2) AS estimated_fill_rate_pct
               FROM monthly_vacancies
             ) AS source
             ON target.registration_month = source.registration_month
@@ -397,7 +326,6 @@ tasks:
               AND IFNULL(target.tipo_de_contrato, '') = IFNULL(source.tipo_de_contrato, '')
               AND IFNULL(target.agente_aprobo, '') = IFNULL(source.agente_aprobo, '')
               AND IFNULL(target.punto_atencion, '') = IFNULL(source.punto_atencion, '')
-            
             WHEN MATCHED THEN
               UPDATE SET
                 total_vacancies = source.total_vacancies,
@@ -427,15 +355,108 @@ tasks:
                 avg_applications_per_position = source.avg_applications_per_position,
                 max_applications_single_vacancy = source.max_applications_single_vacancy,
                 estimated_fill_rate_pct = source.estimated_fill_rate_pct,
-                mart_refreshed_at = source.mart_refreshed_at
-            
+                mart_refreshed_at = CURRENT_TIMESTAMP()
             WHEN NOT MATCHED THEN
-              INSERT ROW;
+              INSERT (
+                registration_month,
+                year,
+                month,
+                quarter,
+                month_name,
+                year_month,
+                estado_actual,
+                tipo_de_vacante,
+                tipo_de_contrato,
+                agente_aprobo,
+                punto_atencion,
+                total_vacancies,
+                unique_processes,
+                total_positions_offered,
+                total_applications,
+                vacancies_with_applications,
+                vacancies_no_applications,
+                pct_with_applications,
+                vacancies_high_interest,
+                vacancies_very_high_interest,
+                active_vacancies,
+                closed_vacancies,
+                expired_vacancies,
+                suspended_vacancies,
+                pct_active,
+                pct_closed,
+                indefinite_contracts,
+                fixed_term_contracts,
+                project_based_contracts,
+                service_contracts,
+                applicant_type,
+                regular_type,
+                avg_posting_duration_days,
+                avg_time_to_close_days,
+                avg_applications_per_vacancy,
+                avg_applications_per_position,
+                max_applications_single_vacancy,
+                estimated_fill_rate_pct,
+                cumulative_vacancies_by_status,
+                prev_month_vacancies,
+                mom_growth_pct,
+                same_month_last_year,
+                yoy_growth_pct,
+                three_month_moving_avg_vacancies,
+                three_month_moving_avg_applications,
+                mart_refreshed_at
+              )
+              VALUES (
+                source.registration_month,
+                source.year,
+                source.month,
+                source.quarter,
+                source.month_name,
+                source.year_month,
+                source.estado_actual,
+                source.tipo_de_vacante,
+                source.tipo_de_contrato,
+                source.agente_aprobo,
+                source.punto_atencion,
+                source.total_vacancies,
+                source.unique_processes,
+                source.total_positions_offered,
+                source.total_applications,
+                source.vacancies_with_applications,
+                source.vacancies_no_applications,
+                source.pct_with_applications,
+                source.vacancies_high_interest,
+                source.vacancies_very_high_interest,
+                source.active_vacancies,
+                source.closed_vacancies,
+                source.expired_vacancies,
+                source.suspended_vacancies,
+                source.pct_active,
+                source.pct_closed,
+                source.indefinite_contracts,
+                source.fixed_term_contracts,
+                source.project_based_contracts,
+                source.service_contracts,
+                source.applicant_type,
+                source.regular_type,
+                source.avg_posting_duration_days,
+                source.avg_time_to_close_days,
+                source.avg_applications_per_vacancy,
+                source.avg_applications_per_position,
+                source.max_applications_single_vacancy,
+                source.estimated_fill_rate_pct,
+                CAST(NULL AS INT64),      -- cumulative_vacancies_by_status (recalculated next step)
+                CAST(NULL AS INT64),      -- prev_month_vacancies (recalculated next step)
+                CAST(NULL AS FLOAT64),    -- mom_growth_pct (recalculated next step)
+                CAST(NULL AS INT64),      -- same_month_last_year (recalculated next step)
+                CAST(NULL AS FLOAT64),    -- yoy_growth_pct (recalculated next step)
+                CAST(NULL AS FLOAT64),    -- three_month_moving_avg_vacancies (recalculated next step)
+                CAST(NULL AS FLOAT64),    -- three_month_moving_avg_applications (recalculated next step)
+                CURRENT_TIMESTAMP()       -- mart_refreshed_at
+              );
 
         - id: recalculate_performance_window_functions
           type: io.kestra.plugin.gcp.bigquery.Query
           sql: |
-            -- Recalculate cumulative totals and growth metrics after incremental update
             CREATE OR REPLACE TABLE `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_performance) }}`
             PARTITION BY DATE_TRUNC(registration_month, MONTH)
             CLUSTER BY estado_actual, tipo_de_contrato, agente_aprobo
@@ -444,20 +465,15 @@ tasks:
               * EXCEPT(cumulative_vacancies_by_status, prev_month_vacancies, mom_growth_pct, 
                        same_month_last_year, yoy_growth_pct, three_month_moving_avg_vacancies, 
                        three_month_moving_avg_applications),
-              
-              -- Recalculate cumulative totals
               SUM(total_vacancies) OVER (
                 PARTITION BY estado_actual 
                 ORDER BY registration_month 
                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
               ) AS cumulative_vacancies_by_status,
-              
-              -- Month-over-Month Growth
               LAG(total_vacancies) OVER (
                 PARTITION BY estado_actual, tipo_de_contrato, agente_aprobo
                 ORDER BY registration_month
               ) AS prev_month_vacancies,
-              
               ROUND(SAFE_DIVIDE(
                 total_vacancies - LAG(total_vacancies) OVER (
                   PARTITION BY estado_actual, tipo_de_contrato, agente_aprobo
@@ -468,13 +484,10 @@ tasks:
                   ORDER BY registration_month
                 )
               ) * 100, 2) AS mom_growth_pct,
-              
-              -- Year-over-Year Comparison
               LAG(total_vacancies, 12) OVER (
                 PARTITION BY estado_actual, tipo_de_contrato, agente_aprobo
                 ORDER BY registration_month
               ) AS same_month_last_year,
-              
               ROUND(SAFE_DIVIDE(
                 total_vacancies - LAG(total_vacancies, 12) OVER (
                   PARTITION BY estado_actual, tipo_de_contrato, agente_aprobo
@@ -485,20 +498,16 @@ tasks:
                   ORDER BY registration_month
                 )
               ) * 100, 2) AS yoy_growth_pct,
-              
-              -- 3-Month Moving Averages
               ROUND(AVG(total_vacancies) OVER (
                 PARTITION BY estado_actual, tipo_de_contrato, agente_aprobo
                 ORDER BY registration_month 
                 ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
               ), 1) AS three_month_moving_avg_vacancies,
-              
               ROUND(AVG(avg_applications_per_vacancy) OVER (
                 PARTITION BY estado_actual, tipo_de_contrato, agente_aprobo
                 ORDER BY registration_month 
                 ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
               ), 1) AS three_month_moving_avg_applications
-              
             FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_performance) }}`;
 
   # ==========================================
@@ -528,7 +537,6 @@ tasks:
         - id: refresh_demand_full
           type: io.kestra.plugin.gcp.bigquery.Query
           sql: |
-            -- Full refresh: recreate entire vacancy demand analysis table
             CREATE OR REPLACE TABLE `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_demand) }}`
             PARTITION BY DATE_TRUNC(registration_month, MONTH)
             CLUSTER BY cargo, empresa, punto_atencion
@@ -545,103 +553,71 @@ tasks:
                 EXTRACT(QUARTER FROM fecha_registro) AS quarter,
                 FORMAT_DATE('%B', DATE(fecha_registro)) AS month_name,
                 FORMAT_DATE('%Y-%m', DATE(fecha_registro)) AS year_month,
-                
-                -- Job Dimensions
                 cargo,
                 nombre_vacante,
                 empresa,
                 tipodocumentoempresa,
                 punto_atencion,
                 pais,
-                
-                -- Demand Metrics
                 COUNT(*) AS total_postings,
                 COUNT(DISTINCT empresa) AS unique_companies_posting,
                 COUNT(DISTINCT cargo) AS unique_positions,
                 SUM(puestos_de_trabajo) AS total_positions_available,
                 SUM(n_postulados) AS total_interested_candidates,
-                
-                -- Competitiveness Metrics
                 AVG(n_postulados) AS avg_candidates_per_posting,
                 AVG(SAFE_DIVIDE(n_postulados, puestos_de_trabajo)) AS avg_candidates_per_position,
                 MAX(n_postulados) AS max_candidates_single_posting,
-                
-                -- Top Job Indicators
                 COUNTIF(n_postulados >= 20) AS high_demand_postings,
                 COUNTIF(puestos_de_trabajo >= 5) AS bulk_hiring_postings,
-                
-                -- Company Hiring Activity (postings with 10+ positions)
                 COUNTIF(puestos_de_trabajo >= 10) AS companies_bulk_hiring,
                 AVG(puestos_de_trabajo) AS avg_positions_per_posting,
-                
-                -- Market Saturation Indicators
                 SAFE_DIVIDE(SUM(n_postulados), SUM(puestos_de_trabajo)) AS supply_demand_ratio,
                 COUNTIF(n_postulados < puestos_de_trabajo) AS undersupplied_postings,
                 COUNTIF(n_postulados >= puestos_de_trabajo * 3) AS oversupplied_postings
-                
               FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_operations) }}.{{ render(vars.base_table) }}`
               WHERE fecha_registro IS NOT NULL
               GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12
             )
-            
             SELECT
-              -- Date Dimensions
               registration_month,
               year,
               month,
               quarter,
               month_name,
               year_month,
-              
-              -- Job Dimensions
               cargo,
               nombre_vacante,
               empresa,
               tipodocumentoempresa,
               punto_atencion,
               pais,
-              
-              -- Core Demand Metrics
               total_postings,
               unique_companies_posting,
               unique_positions,
               total_positions_available,
               total_interested_candidates,
-              
-              -- Competitiveness Metrics
               ROUND(avg_candidates_per_posting, 1) AS avg_candidates_per_posting,
               ROUND(avg_candidates_per_position, 1) AS avg_candidates_per_position,
               max_candidates_single_posting,
-              
-              -- Demand Indicators
               high_demand_postings,
               bulk_hiring_postings,
               ROUND(SAFE_DIVIDE(high_demand_postings, total_postings) * 100, 2) AS pct_high_demand,
-              
-              -- Company Activity
               companies_bulk_hiring,
               ROUND(avg_positions_per_posting, 1) AS avg_positions_per_posting,
-              
-              -- Market Balance
               ROUND(supply_demand_ratio, 2) AS supply_demand_ratio,
               undersupplied_postings,
               oversupplied_postings,
               ROUND(SAFE_DIVIDE(undersupplied_postings, total_postings) * 100, 2) AS pct_undersupplied,
               ROUND(SAFE_DIVIDE(oversupplied_postings, total_postings) * 100, 2) AS pct_oversupplied,
-              
-              -- Cumulative Demand by Position
               SUM(total_positions_available) OVER (
                 PARTITION BY cargo 
                 ORDER BY registration_month 
                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
               ) AS cumulative_positions_by_role,
-              
-              -- Month-over-Month Growth
               LAG(total_postings) OVER (
                 PARTITION BY cargo, empresa, punto_atencion
                 ORDER BY registration_month
               ) AS prev_month_postings,
-              
               ROUND(SAFE_DIVIDE(
                 total_postings - LAG(total_postings) OVER (
                   PARTITION BY cargo, empresa, punto_atencion
@@ -652,13 +628,10 @@ tasks:
                   ORDER BY registration_month
                 )
               ) * 100, 2) AS mom_growth_pct,
-              
-              -- Year-over-Year Comparison
               LAG(total_postings, 12) OVER (
                 PARTITION BY cargo, empresa, punto_atencion
                 ORDER BY registration_month
               ) AS same_month_last_year,
-              
               ROUND(SAFE_DIVIDE(
                 total_postings - LAG(total_postings, 12) OVER (
                   PARTITION BY cargo, empresa, punto_atencion
@@ -669,35 +642,27 @@ tasks:
                   ORDER BY registration_month
                 )
               ) * 100, 2) AS yoy_growth_pct,
-              
-              -- 3-Month Moving Averages
               ROUND(AVG(total_postings) OVER (
                 PARTITION BY cargo, empresa, punto_atencion
                 ORDER BY registration_month 
                 ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
               ), 1) AS three_month_moving_avg_postings,
-              
               ROUND(AVG(avg_candidates_per_posting) OVER (
                 PARTITION BY cargo, empresa, punto_atencion
                 ORDER BY registration_month 
                 ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
               ), 1) AS three_month_moving_avg_candidates,
-              
-              -- Position Popularity Ranking
               RANK() OVER (
                 PARTITION BY registration_month 
                 ORDER BY total_postings DESC
               ) AS position_demand_rank,
-              
               CURRENT_TIMESTAMP() AS mart_refreshed_at
-              
             FROM monthly_demand;
       
       INCREMENTAL:
         - id: refresh_demand_incremental
           type: io.kestra.plugin.gcp.bigquery.Query
           sql: |
-            -- Monthly incremental refresh: update or insert data for the specified month
             MERGE `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_demand) }}` AS target
             USING (
               WITH monthly_demand AS (
@@ -714,33 +679,27 @@ tasks:
                   tipodocumentoempresa,
                   punto_atencion,
                   pais,
-                  
                   COUNT(*) AS total_postings,
                   COUNT(DISTINCT empresa) AS unique_companies_posting,
                   COUNT(DISTINCT cargo) AS unique_positions,
                   SUM(puestos_de_trabajo) AS total_positions_available,
                   SUM(n_postulados) AS total_interested_candidates,
-                  
                   AVG(n_postulados) AS avg_candidates_per_posting,
                   AVG(SAFE_DIVIDE(n_postulados, puestos_de_trabajo)) AS avg_candidates_per_position,
                   MAX(n_postulados) AS max_candidates_single_posting,
-                  
                   COUNTIF(n_postulados >= 20) AS high_demand_postings,
                   COUNTIF(puestos_de_trabajo >= 5) AS bulk_hiring_postings,
                   COUNTIF(puestos_de_trabajo >= 10) AS companies_bulk_hiring,
                   AVG(puestos_de_trabajo) AS avg_positions_per_posting,
-                  
                   SAFE_DIVIDE(SUM(n_postulados), SUM(puestos_de_trabajo)) AS supply_demand_ratio,
                   COUNTIF(n_postulados < puestos_de_trabajo) AS undersupplied_postings,
                   COUNTIF(n_postulados >= puestos_de_trabajo * 3) AS oversupplied_postings
-                  
                 FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_operations) }}.{{ render(vars.base_table) }}`
                 WHERE fecha_registro IS NOT NULL
                   AND DATE(fecha_registro) >= DATE('{{ render(vars.start_date) }}')
                   AND DATE(fecha_registro) < {{ render(vars.end_date) }}
                 GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12
               )
-              
               SELECT
                 registration_month,
                 year,
@@ -771,17 +730,7 @@ tasks:
                 undersupplied_postings,
                 oversupplied_postings,
                 ROUND(SAFE_DIVIDE(undersupplied_postings, total_postings) * 100, 2) AS pct_undersupplied,
-                ROUND(SAFE_DIVIDE(oversupplied_postings, total_postings) * 100, 2) AS pct_oversupplied,
-                NULL AS cumulative_positions_by_role,
-                NULL AS prev_month_postings,
-                NULL AS mom_growth_pct,
-                NULL AS same_month_last_year,
-                NULL AS yoy_growth_pct,
-                NULL AS three_month_moving_avg_postings,
-                NULL AS three_month_moving_avg_candidates,
-                NULL AS position_demand_rank,
-                CURRENT_TIMESTAMP() AS mart_refreshed_at
-                
+                ROUND(SAFE_DIVIDE(oversupplied_postings, total_postings) * 100, 2) AS pct_oversupplied
               FROM monthly_demand
             ) AS source
             ON target.registration_month = source.registration_month
@@ -789,7 +738,6 @@ tasks:
               AND IFNULL(target.nombre_vacante, '') = IFNULL(source.nombre_vacante, '')
               AND IFNULL(target.empresa, '') = IFNULL(source.empresa, '')
               AND IFNULL(target.punto_atencion, '') = IFNULL(source.punto_atencion, '')
-            
             WHEN MATCHED THEN
               UPDATE SET
                 total_postings = source.total_postings,
@@ -810,15 +758,94 @@ tasks:
                 oversupplied_postings = source.oversupplied_postings,
                 pct_undersupplied = source.pct_undersupplied,
                 pct_oversupplied = source.pct_oversupplied,
-                mart_refreshed_at = source.mart_refreshed_at
-            
+                mart_refreshed_at = CURRENT_TIMESTAMP()
             WHEN NOT MATCHED THEN
-              INSERT ROW;
+              INSERT (
+                registration_month,
+                year,
+                month,
+                quarter,
+                month_name,
+                year_month,
+                cargo,
+                nombre_vacante,
+                empresa,
+                tipodocumentoempresa,
+                punto_atencion,
+                pais,
+                total_postings,
+                unique_companies_posting,
+                unique_positions,
+                total_positions_available,
+                total_interested_candidates,
+                avg_candidates_per_posting,
+                avg_candidates_per_position,
+                max_candidates_single_posting,
+                high_demand_postings,
+                bulk_hiring_postings,
+                pct_high_demand,
+                companies_bulk_hiring,
+                avg_positions_per_posting,
+                supply_demand_ratio,
+                undersupplied_postings,
+                oversupplied_postings,
+                pct_undersupplied,
+                pct_oversupplied,
+                cumulative_positions_by_role,
+                prev_month_postings,
+                mom_growth_pct,
+                same_month_last_year,
+                yoy_growth_pct,
+                three_month_moving_avg_postings,
+                three_month_moving_avg_candidates,
+                position_demand_rank,
+                mart_refreshed_at
+              )
+              VALUES (
+                source.registration_month,
+                source.year,
+                source.month,
+                source.quarter,
+                source.month_name,
+                source.year_month,
+                source.cargo,
+                source.nombre_vacante,
+                source.empresa,
+                source.tipodocumentoempresa,
+                source.punto_atencion,
+                source.pais,
+                source.total_postings,
+                source.unique_companies_posting,
+                source.unique_positions,
+                source.total_positions_available,
+                source.total_interested_candidates,
+                source.avg_candidates_per_posting,
+                source.avg_candidates_per_position,
+                source.max_candidates_single_posting,
+                source.high_demand_postings,
+                source.bulk_hiring_postings,
+                source.pct_high_demand,
+                source.companies_bulk_hiring,
+                source.avg_positions_per_posting,
+                source.supply_demand_ratio,
+                source.undersupplied_postings,
+                source.oversupplied_postings,
+                source.pct_undersupplied,
+                source.pct_oversupplied,
+                CAST(NULL AS INT64),    -- cumulative_positions_by_role (recalculated next step)
+                CAST(NULL AS INT64),    -- prev_month_postings (recalculated next step)
+                CAST(NULL AS FLOAT64),  -- mom_growth_pct (recalculated next step)
+                CAST(NULL AS INT64),    -- same_month_last_year (recalculated next step)
+                CAST(NULL AS FLOAT64),  -- yoy_growth_pct (recalculated next step)
+                CAST(NULL AS FLOAT64),  -- three_month_moving_avg_postings (recalculated next step)
+                CAST(NULL AS FLOAT64),  -- three_month_moving_avg_candidates (recalculated next step)
+                CAST(NULL AS INT64),    -- position_demand_rank (recalculated next step)
+                CURRENT_TIMESTAMP()     -- mart_refreshed_at
+              );
 
         - id: recalculate_demand_window_functions
           type: io.kestra.plugin.gcp.bigquery.Query
           sql: |
-            -- Recalculate cumulative totals, rankings, and growth metrics after incremental update
             CREATE OR REPLACE TABLE `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_demand) }}`
             PARTITION BY DATE_TRUNC(registration_month, MONTH)
             CLUSTER BY cargo, empresa, punto_atencion
@@ -827,20 +854,15 @@ tasks:
               * EXCEPT(cumulative_positions_by_role, prev_month_postings, mom_growth_pct, 
                        same_month_last_year, yoy_growth_pct, three_month_moving_avg_postings, 
                        three_month_moving_avg_candidates, position_demand_rank),
-              
-              -- Recalculate cumulative totals
               SUM(total_positions_available) OVER (
                 PARTITION BY cargo 
                 ORDER BY registration_month 
                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
               ) AS cumulative_positions_by_role,
-              
-              -- Month-over-Month Growth
               LAG(total_postings) OVER (
                 PARTITION BY cargo, empresa, punto_atencion
                 ORDER BY registration_month
               ) AS prev_month_postings,
-              
               ROUND(SAFE_DIVIDE(
                 total_postings - LAG(total_postings) OVER (
                   PARTITION BY cargo, empresa, punto_atencion
@@ -851,13 +873,10 @@ tasks:
                   ORDER BY registration_month
                 )
               ) * 100, 2) AS mom_growth_pct,
-              
-              -- Year-over-Year Comparison
               LAG(total_postings, 12) OVER (
                 PARTITION BY cargo, empresa, punto_atencion
                 ORDER BY registration_month
               ) AS same_month_last_year,
-              
               ROUND(SAFE_DIVIDE(
                 total_postings - LAG(total_postings, 12) OVER (
                   PARTITION BY cargo, empresa, punto_atencion
@@ -868,26 +887,20 @@ tasks:
                   ORDER BY registration_month
                 )
               ) * 100, 2) AS yoy_growth_pct,
-              
-              -- 3-Month Moving Averages
               ROUND(AVG(total_postings) OVER (
                 PARTITION BY cargo, empresa, punto_atencion
                 ORDER BY registration_month 
                 ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
               ), 1) AS three_month_moving_avg_postings,
-              
               ROUND(AVG(avg_candidates_per_posting) OVER (
                 PARTITION BY cargo, empresa, punto_atencion
                 ORDER BY registration_month 
                 ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
               ), 1) AS three_month_moving_avg_candidates,
-              
-              -- Position Popularity Ranking
               RANK() OVER (
                 PARTITION BY registration_month 
                 ORDER BY total_postings DESC
               ) AS position_demand_rank
-              
             FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_demand) }}`;
 
   # ==========================================
@@ -911,93 +924,45 @@ tasks:
   - id: validate_performance_mart
     type: io.kestra.plugin.gcp.bigquery.Query
     sql: |
-      SELECT 
-        'Total Records' AS metric,
-        CAST(COUNT(*) AS STRING) AS value
+      SELECT 'Total Records' AS metric, CAST(COUNT(*) AS STRING) AS value
       FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_performance) }}`
-      
       UNION ALL
-      
-      SELECT 
-        'Date Range' AS metric,
-        CONCAT(
-          CAST(MIN(registration_month) AS STRING), 
-          ' to ', 
-          CAST(MAX(registration_month) AS STRING)
-        ) AS value
+      SELECT 'Date Range' AS metric,
+        CONCAT(CAST(MIN(registration_month) AS STRING), ' to ', CAST(MAX(registration_month) AS STRING)) AS value
       FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_performance) }}`
-      
       UNION ALL
-      
-      SELECT 
-        'Total Vacancies' AS metric,
-        CAST(SUM(total_vacancies) AS STRING) AS value
+      SELECT 'Total Vacancies' AS metric, CAST(SUM(total_vacancies) AS STRING) AS value
       FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_performance) }}`
-      
       UNION ALL
-      
-      SELECT 
-        'Avg Fill Rate %' AS metric,
-        CAST(ROUND(AVG(estimated_fill_rate_pct), 2) AS STRING) AS value
+      SELECT 'Avg Fill Rate %' AS metric, CAST(ROUND(AVG(estimated_fill_rate_pct), 2) AS STRING) AS value
       FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_performance) }}`
-      
       UNION ALL
-      
-      SELECT 
-        'Avg Applications per Vacancy' AS metric,
-        CAST(ROUND(AVG(avg_applications_per_vacancy), 1) AS STRING) AS value
+      SELECT 'Avg Applications per Vacancy' AS metric, CAST(ROUND(AVG(avg_applications_per_vacancy), 1) AS STRING) AS value
       FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_performance) }}`
-      
       ORDER BY metric;
     store: true
 
   - id: validate_demand_mart
     type: io.kestra.plugin.gcp.bigquery.Query
     sql: |
-      SELECT 
-        'Total Records' AS metric,
-        CAST(COUNT(*) AS STRING) AS value
+      SELECT 'Total Records' AS metric, CAST(COUNT(*) AS STRING) AS value
       FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_demand) }}`
-      
       UNION ALL
-      
-      SELECT 
-        'Date Range' AS metric,
-        CONCAT(
-          CAST(MIN(registration_month) AS STRING), 
-          ' to ', 
-          CAST(MAX(registration_month) AS STRING)
-        ) AS value
+      SELECT 'Date Range' AS metric,
+        CONCAT(CAST(MIN(registration_month) AS STRING), ' to ', CAST(MAX(registration_month) AS STRING)) AS value
       FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_demand) }}`
-      
       UNION ALL
-      
-      SELECT 
-        'Total Job Postings' AS metric,
-        CAST(SUM(total_postings) AS STRING) AS value
+      SELECT 'Total Job Postings' AS metric, CAST(SUM(total_postings) AS STRING) AS value
       FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_demand) }}`
-      
       UNION ALL
-      
-      SELECT 
-        'Unique Companies Hiring' AS metric,
-        CAST(COUNT(DISTINCT empresa) AS STRING) AS value
+      SELECT 'Unique Companies Hiring' AS metric, CAST(COUNT(DISTINCT empresa) AS STRING) AS value
       FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_demand) }}`
-      
       UNION ALL
-      
-      SELECT 
-        'Unique Job Positions' AS metric,
-        CAST(COUNT(DISTINCT cargo) AS STRING) AS value
+      SELECT 'Unique Job Positions' AS metric, CAST(COUNT(DISTINCT cargo) AS STRING) AS value
       FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_demand) }}`
-      
       UNION ALL
-      
-      SELECT 
-        'Avg Supply/Demand Ratio' AS metric,
-        CAST(ROUND(AVG(supply_demand_ratio), 2) AS STRING) AS value
+      SELECT 'Avg Supply/Demand Ratio' AS metric, CAST(ROUND(AVG(supply_demand_ratio), 2) AS STRING) AS value
       FROM `{{ kv('GCP_PROJECT_ID') }}.{{ render(vars.dataset_marts) }}.{{ render(vars.mart_table_demand) }}`
-      
       ORDER BY metric;
     store: true
 
