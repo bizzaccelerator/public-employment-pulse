@@ -11,11 +11,21 @@ Reads two env vars injected by Kestra:
     MONTH        integer month of interest (used to stamp output parquet)
     YEAR         integer year  of interest (used to stamp output parquet)
 
+Optional env var:
+    SHEET_OVERRIDES_PATH   path to a local JSON file mapping a filename
+                           substring (lowercase) -> exact sheet name to use,
+                           for the rare file that content-detection can't
+                           resolve confidently. Not required in the normal
+                           case — see resolve_sheet() below.
+
 Pipeline steps
 --------------
 1. ingest_from_gcs()      List the bucket prefix, detect the sheet in each
-                          file, download + concat into a single raw DataFrame,
-                          then restrict to the 27 columns in SELECT_COLUMNS.
+                          file BY CONTENT (falling back to an optional
+                          override file, never to a blind "first sheet"
+                          default), download + concat into a single raw
+                          DataFrame, then restrict to the 27 columns in
+                          SELECT_COLUMNS.
 2. normalize_column_names()  Clean column headers.
 3. rename with RENAME_DICT   Map long/special column names to short keys.
                              Note: "indique_el_curso_al_que_desea_inscribirse" (no
@@ -28,27 +38,60 @@ Pipeline steps
 9. add_population_flags()    Derive VVG, VCA, migrante, étnico, discapacidad,
                              reincorporados columns.
 10. Write output parquet + record_count.txt for Kestra to consume.
+
+WHY SHEET/COURSE DETECTION CHANGED
+-----------------------------------
+Course names and the sheet names inside each monthly Excel file change every
+month (new courses are onboarded constantly, and nobody controls how the
+source form exports its sheet names). The old approach (SHEET_MAP: a
+filename-keyword -> sheet-name lookup you had to edit in code every month)
+does not scale to that reality, and its fallback (blindly read the first
+sheet) fails *silently* — a wrong-sheet read just produces a DataFrame with
+garbage columns that get quietly dropped later by the SELECT_COLUMNS filter.
+
+The new resolve_sheet() instead scores every sheet in a workbook by whether
+it actually contains the identity columns every enrollment sheet must have
+(numero_de_documento, nombres), regardless of what the sheet or file is
+named. This requires zero code changes when a new course file shows up.
+A small optional override file remains for genuinely ambiguous edge cases,
+but it's no longer required in the common case, and an unresolved file now
+raises loudly instead of defaulting to the wrong sheet.
 """
 
 import os
 import io
+import json
 import pandas as pd
 import numpy as np
 import gcsfs
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-# Sheet-name lookup: maps a substring of the Excel filename (lowercase) to the sheet name inside that file.
-# Add new entries here whenever a new course file is onboarded.
-SHEET_MAP: dict[str, str] = {
-    "atencion al cliente":  "Matriculados ATENCION MEDIOS DI",
-    "bisuteria":            "Hoja1",
-    "cocteleria":           "COCTELERIA BASICA - MAYOR DE 18",
-    "alimentos":            "Hoja1",
+# Optional manual override: filename substring (lowercase) -> exact sheet name.
+# Only needed for genuinely ambiguous files that content-detection can't
+# resolve on its own (e.g. two sheets that both look like valid data).
+# Loaded from a JSON file so ops can edit it without a code deploy — see
+# load_sheet_overrides(). Empty dict if no override file is configured.
+SHEET_OVERRIDES: dict[str, str] = {}
+
+# How many of the required identity columns a sheet must contain (after
+# normalize_column_names + RENAME_DICT) before resolve_sheet() will accept
+# it as the data sheet. Kept at 2 (both identity columns) to avoid false
+# positives on unrelated summary/pivot sheets that might contain just one.
+MIN_IDENTITY_SCORE = 2
+
+# Canonical identity column -> header spellings that should count toward it.
+# These are checked AFTER normalize_column_names + RENAME_DICT are applied
+# to the candidate sheet, so accented / long-form headers are already
+# resolved to their canonical name by the time this check runs.
+REQUIRED_IDENTITY_HINTS: dict[str, list[str]] = {
+    "numero_de_documento": ["numero_de_documento"],
+    "nombres":             ["nombres"],
 }
 
-# Fallback: if no SHEET_MAP key matches the filename, read the first sheet.
-DEFAULT_SHEET_INDEX = 0
+# How many rows to peek when scoring a candidate sheet. Small on purpose —
+# this is just enough to read the header row and confirm columns exist.
+SHEET_PEEK_ROWS = 5
 
 RENAME_DICT: dict[str, str] = {
     # ── Long / special-character headers ─────────────────────────────────────
@@ -124,24 +167,39 @@ DISCAPACIDAD_PATTERNS: dict[str, str] = {
 }
 
 
+# ── Sheet override loading ───────────────────────────────────────────────────
+
+def load_sheet_overrides(path: str | None) -> dict[str, str]:
+    """
+    Load an optional filename-keyword -> sheet-name override map from a JSON
+    file, e.g.:
+
+        {
+          "cocteleria": "COCTELERIA BASICA - MAYOR DE 18",
+          "un archivo raro que confunde la deteccion": "Hoja3"
+        }
+
+    This is only needed for genuinely ambiguous files that content-based
+    detection can't resolve on its own. It is NOT required for the normal
+    monthly case of new course names appearing — those are handled by
+    resolve_sheet()'s content scoring with no configuration at all.
+
+    Returns an empty dict if *path* is None, missing, or unreadable — the
+    pipeline must never hard-fail just because no override file exists.
+    """
+    if not path:
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return {str(k).lower(): str(v) for k, v in json.load(f).items()}
+    except FileNotFoundError:
+        return {}
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"  ⚠  Could not read sheet overrides file at {path}: {e}")
+        return {}
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
-
-def resolve_sheet(filename: str, xl: pd.ExcelFile) -> str:
-    """
-    Return the sheet name to read from *xl* based on the filename.
-
-    Priority:
-      1. First SHEET_MAP key whose substring appears in the filename.
-      2. The sheet at DEFAULT_SHEET_INDEX if no key matches.
-    """
-    name_lower = filename.lower()
-    for keyword, sheet_name in SHEET_MAP.items():
-        if keyword in name_lower:
-            if sheet_name in xl.sheet_names:
-                return sheet_name
-            # keyword matched but sheet name was not found — fall through
-    return xl.sheet_names[DEFAULT_SHEET_INDEX]
-
 
 def normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
     """Strip, lowercase and underscore all column headers."""
@@ -154,6 +212,97 @@ def normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
         .str.replace(" ", "_")
     )
     return df
+
+
+def _score_sheet_identity_columns(
+    raw_bytes: bytes,
+    sheet_name: str,
+    skiprows: int,
+    rename_dict: dict[str, str],
+) -> int:
+    """
+    Peek at *sheet_name* and return how many of REQUIRED_IDENTITY_HINTS'
+    canonical identity columns are present after normalisation + renaming.
+
+    Returns -1 if the sheet can't even be read at the given skiprows offset
+    (e.g. wrong header row, empty sheet, corrupt sheet) so it never wins
+    against a sheet that reads cleanly.
+    """
+    try:
+        peek = pd.read_excel(
+            io.BytesIO(raw_bytes),
+            sheet_name=sheet_name,
+            skiprows=skiprows,
+            header=0,
+            nrows=SHEET_PEEK_ROWS,
+        )
+    except Exception:
+        return -1
+
+    peek = normalize_column_names(peek)
+    peek.rename(columns=rename_dict, inplace=True)
+    cols = set(peek.columns)
+
+    score = 0
+    for canonical, variants in REQUIRED_IDENTITY_HINTS.items():
+        if canonical in cols or any(v in cols for v in variants):
+            score += 1
+    return score
+
+
+def resolve_sheet(
+    filename: str,
+    raw_bytes: bytes,
+    xl: pd.ExcelFile,
+    rename_dict: dict[str, str],
+    skiprows: int = 2,
+    overrides: dict[str, str] | None = None,
+    min_score: int = MIN_IDENTITY_SCORE,
+) -> str:
+    """
+    Return the sheet name to read from *xl*.
+
+    Resolution order:
+      1. Manual override: first key in *overrides* whose substring appears
+         in the (lowercased) filename, IF that sheet name exists in this
+         workbook. Intended only for edge cases content-detection can't
+         confidently resolve.
+      2. Content-based detection: score every sheet in the workbook by how
+         many required identity columns (numero_de_documento, nombres) it
+         contains once normalised and renamed, and return the best match.
+         This is what handles the normal monthly case — new course names,
+         new sheet names — with zero configuration.
+
+    Raises:
+        ValueError: if no sheet in the workbook scores >= *min_score*.
+                    This is intentional — silently reading the wrong sheet
+                    causes data to vanish downstream with no visible error,
+                    which is worse than failing loudly here.
+    """
+    overrides = overrides or {}
+    name_lower = filename.lower()
+
+    # 1. Manual override (rare edge case)
+    for keyword, sheet_name in overrides.items():
+        if keyword in name_lower and sheet_name in xl.sheet_names:
+            return sheet_name
+
+    # 2. Content-based detection (normal case)
+    scores = {
+        name: _score_sheet_identity_columns(raw_bytes, name, skiprows, rename_dict)
+        for name in xl.sheet_names
+    }
+    best_sheet, best_score = max(scores.items(), key=lambda kv: kv[1])
+
+    if best_score < min_score:
+        raise ValueError(
+            f"Could not confidently identify the data sheet in '{filename}'. "
+            f"Sheet identity-column scores: {scores} "
+            f"(need >= {min_score}/{len(REQUIRED_IDENTITY_HINTS)}). "
+            f"If this file is legitimate but structured differently, add an "
+            f"entry to the sheet overrides file rather than editing code."
+        )
+    return best_sheet
 
 
 def classify_age(age: int | float) -> str | float:
@@ -179,27 +328,34 @@ def ingest_from_gcs(
     fs: gcsfs.GCSFileSystem,
     rename_dict: dict[str, str],
     skiprows: int = 2,
+    sheet_overrides: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     """
     Single unified task: list every .xlsx file under *bucket_prefix* in GCS,
-    read the relevant sheet from each one, normalise + rename columns, and
-    return a single concatenated DataFrame containing only the columns that
-    are common to all files.
+    read the relevant sheet from each one (auto-detected by content — see
+    resolve_sheet()), normalise + rename columns, and return a single
+    concatenated DataFrame containing only the columns declared in
+    SELECT_COLUMNS.
 
     Args:
-        bucket_prefix : GCS path without gs://, e.g.
-                        "my-bucket/formacion"
-        fs            : authenticated GCSFileSystem instance
-        rename_dict   : column rename mapping applied after normalisation
-        skiprows      : rows to skip before the header row in each sheet
+        bucket_prefix   : GCS path without gs://, e.g.
+                          "my-bucket/formacion"
+        fs              : authenticated GCSFileSystem instance
+        rename_dict     : column rename mapping applied after normalisation
+        skiprows        : rows to skip before the header row in each sheet
+        sheet_overrides : optional filename-keyword -> sheet-name overrides
+                          for edge cases content-detection can't resolve
 
     Returns:
         Combined DataFrame with common columns only.
 
     Raises:
         FileNotFoundError : if no .xlsx files are found under the prefix
-        ValueError        : if the files share no common columns
+        ValueError        : if the files share no common columns, or if a
+                            file's data sheet can't be confidently identified
     """
+    sheet_overrides = sheet_overrides or {}
+
     # 1. Discover all Excel files under the prefix ─────────────────────────
     all_paths: list[str] = fs.glob(f"{bucket_prefix}/*.xlsx")
     if not all_paths:
@@ -210,6 +366,7 @@ def ingest_from_gcs(
 
     dataframes: list[pd.DataFrame] = []
     column_sets: list[set] = []
+    skipped_files: list[str] = []
 
     # 2. Download, read and normalise each file ─────────────────────────────
     for gcs_path in sorted(all_paths):
@@ -219,7 +376,18 @@ def ingest_from_gcs(
             raw_bytes = f.read()
 
         xl = pd.ExcelFile(io.BytesIO(raw_bytes))
-        sheet_name = resolve_sheet(filename, xl)
+
+        try:
+            sheet_name = resolve_sheet(
+                filename, raw_bytes, xl, rename_dict,
+                skiprows=skiprows, overrides=sheet_overrides,
+            )
+        except ValueError as e:
+            # One unreadable/ambiguous file should not sink the whole
+            # monthly run — skip it, flag it loudly, and keep going.
+            print(f"    ✗ {filename:55s} → SKIPPED: {e}")
+            skipped_files.append(filename)
+            continue
 
         df = pd.read_excel(
             io.BytesIO(raw_bytes),
@@ -235,6 +403,15 @@ def ingest_from_gcs(
         dataframes.append(df)
         column_sets.append(set(df.columns))
         print(f"    ✓ {filename:55s} → sheet: '{sheet_name}' | rows: {len(df)}")
+
+    if not dataframes:
+        raise FileNotFoundError(
+            f"No usable .xlsx files under gs://{bucket_prefix} — "
+            f"all {len(all_paths)} file(s) were skipped: {skipped_files}"
+        )
+    if skipped_files:
+        print(f"  ⚠  Skipped {len(skipped_files)} file(s) that could not be "
+              f"auto-mapped to a data sheet: {skipped_files}")
 
     # 3. Verify at least one common column exists as a sanity check ──────────
     data_col_sets = [cs - {"_source_file"} for cs in column_sets]
@@ -432,18 +609,22 @@ def run_pipeline(
     bucket_prefix: str,
     month: int,
     year: int,
+    sheet_overrides: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     """
     Full end-to-end pipeline.
 
-    1. Ingest (list + download + concat) all Excel files from GCS.
+    1. Ingest (list + download + concat) all Excel files from GCS, with the
+       data sheet in each file auto-detected by content.
     2. Clean and transform.
     3. Return the processed DataFrame.
     """
     fs = gcsfs.GCSFileSystem()
 
     # ── Ingest ────────────────────────────────────────────────────────────
-    inscritos = ingest_from_gcs(bucket_prefix, fs, RENAME_DICT)
+    inscritos = ingest_from_gcs(
+        bucket_prefix, fs, RENAME_DICT, sheet_overrides=sheet_overrides
+    )
 
     # ── Validate ──────────────────────────────────────────────────────────
     inscritos, _ = filter_valid_records(inscritos)
@@ -472,7 +653,10 @@ if __name__ == "__main__":
     month         = int(os.environ["MONTH"])
     year          = int(os.environ["YEAR"])
 
-    inscritos = run_pipeline(bucket_prefix, month, year)
+    # Optional: only needed for genuinely ambiguous files. Absent by default.
+    overrides = load_sheet_overrides(os.environ.get("SHEET_OVERRIDES_PATH"))
+
+    inscritos = run_pipeline(bucket_prefix, month, year, sheet_overrides=overrides)
 
     # Write output artefacts consumed by Kestra outputFiles
     data_processed = os.environ.get("DATA_PROCESSED", "formacion")
