@@ -123,7 +123,7 @@ tasks:
     docker:
       image: python:3.11-slim
     beforeCommands:
-      - pip install pandas sqlalchemy psycopg2-binary pyarrow fastparquet
+      - pip install pandas "sqlalchemy<2.1" psycopg2-binary pyarrow fastparquet
     inputFiles:
       data_file: "{{ outputs.reading_monthly_registries.outputFiles['intermediacion_'+ trigger.date | date('yyyy_M') +'.parquet'] }}"
     env:
